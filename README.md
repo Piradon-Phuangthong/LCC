@@ -14,12 +14,6 @@ A data-driven Python tool that designs **low-carbon concrete mixes** with realis
 - **Excel-style computation logic** for mass balance and absolute volume  
 - Command-line interface for user-driven mix design and testing  
 
-## 📁 Project Structure
-LCC/
-├── lcc_mix_designer.py # Core mix design and KNN logic
-├── data/ # Experimental dataset (45 mixes)
-├── results/ # Validation outputs
-└── README.md
 
 ## 📊 Example Output
 === Strength-Driven Mix Designer ===
