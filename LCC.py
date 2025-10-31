@@ -15,6 +15,10 @@ SHEET_METHOD = True
 SHEET_PASTE_EXTRA_LITERS = 15.0  # the +15 L in your sheet
 
 
+# Excel uses N = 1000 - M (i.e., does NOT subtract air before sizing aggregates)
+SHEET_SUBTRACT_AIR = False  # set True only if you want to subtract air pre-aggregates
+
+
 # ============================================================
 # Material densities (kg/L) for the detailed table
 # (Excel uses 3110, 2890, 2350 kg/m3 => 3.11, 2.89, 2.35 kg/L)
@@ -245,6 +249,56 @@ for fam in BINDER_FAMILIES.keys():
         family_curves[fam] = fit_abram_curve(sub)
 A_g, b_g = fit_abram_curve(df)
 
+# === 3-day strength models (do not affect design; for reporting only) ===
+family_models_f3 = {}
+for fam in BINDER_FAMILIES.keys():
+    sub = df[df["_family"] == fam][["Water/Binder", "Strength3d"]].dropna()
+    if len(sub) >= 2:
+        family_models_f3[fam] = KNeighborsRegressor(
+            n_neighbors=min(4, len(sub)), weights="distance"
+        ).fit(sub[["Water/Binder"]].values, sub["Strength3d"].values)
+
+# global fallback uses wb + blend fractions
+knn_f3_global = KNeighborsRegressor(n_neighbors=4, weights="distance").fit(
+    df[["Water/Binder", "_slag_frac", "_fly_frac"]].values, df["Strength3d"].values
+)
+
+def predict_f3_from_wb(wb: float, fam_key: str) -> float:
+    """Predict 3-day strength from w/b and family; pure reporting (no design impact)."""
+    mdl = family_models_f3.get(fam_key)
+    if mdl is not None:
+        return float(mdl.predict([[wb]])[0])
+    # fallback uses family fractions as proxies
+    fam = BINDER_FAMILIES.get(fam_key, {})
+    s = float(fam.get("GGBFS", 0.0)); f = float(fam.get("Fly Ash", 0.0))
+    return float(knn_f3_global.predict([[wb, s, f]])[0])
+
+def recommend_wb_for_f3(target_f3: float, fam_key: str, wb_start: float) -> float:
+    """
+    Return the LARGEST wb (i.e., minimal tightening) that still meets target_f3.
+    Assumes f3 increases as wb decreases (monotonic in practice for these mixes).
+    Binary-search over [0.34, wb_start]. If current wb already meets target, return it.
+    """
+    cur = predict_f3_from_wb(wb_start, fam_key)
+    if cur >= target_f3:
+        return round(wb_start, 3)
+
+    lo, hi = 0.34, max(0.34, min(0.75, wb_start))
+    # If even the lowest wb can't meet the target, return the lower bound.
+    if predict_f3_from_wb(lo, fam_key) < target_f3:
+        return round(lo, 3)
+
+    # Find the largest wb that still achieves the target (minimal change)
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if predict_f3_from_wb(mid, fam_key) >= target_f3:
+            lo = mid  # can relax wb upward
+        else:
+            hi = mid  # must tighten wb downward
+    return round(hi, 3)
+
+
+
 def _wb_from_curve(f28, fam_key):
     A, b = family_curves.get(fam_key, (A_g, b_g))
     if abs(b) < 1e-9:
@@ -415,7 +469,7 @@ def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5"):
         V_paste_L = _paste_volume_liters(water_pred, c, s, fa)
         air_pct = 1.9  # keep your usual default; or derive per band if you have it
         V_air_L = (air_pct/100.0) * 1000.0
-        V_agg_L = max(0.0, 1000.0 - V_paste_L - V_air_L)   # liters per m³
+        V_agg_L = max(0.0, 1000.0 - V_paste_L - (V_air_L if SHEET_SUBTRACT_AIR else 0.0))
         rho_agg_kg_per_L = _combined_agg_density_kg_per_L(split)
 
         M_agg_total = V_agg_L * rho_agg_kg_per_L
@@ -627,7 +681,26 @@ if __name__ == "__main__":
 
     print(f"\nSum Concrete (kg/m³): {pp['fresh_density_target_kg_m3']:.1f}")
 
-    print("\nEmbodied carbon (kg CO2e/m³):")
+    print(f"\nEmbodied carbon (kg CO2e/m³):")
     print(f" {out['embodied_carbon']['calculated_from_EF_spreadsheet']:.1f}")
 
+    # === Additional reporting: predicted 3-day strength + minimal wb recommendation (no design changes) ===
+    f3_pred_report = predict_f3_from_wb(wb, fam)
+    print("\n3-day strength check (reporting only):")
+    print(f" Predicted f3 ≈ {f3_pred_report:.1f} MPa for wb = {wb:.3f} ({fam})")
+
+    if f3_pred_report + 1e-9 < f3_min:
+        wb_rec = recommend_wb_for_f3(f3_min, fam, wb)
+        f3_at_rec  = predict_f3_from_wb(wb_rec, fam)
+        f28_at_rec = implied_f28_from_wb(wb_rec, fam)  # report-only; design remains as-is
+        print(
+            f" Requirement: ≥ {f3_min:.1f} MPa. "
+            f"Recommended wb: {wb_rec:.3f} (predicts f3 ≈ {f3_at_rec:.1f} MPa, "
+            f"f28 ≈ {f28_at_rec:.1f} MPa)."
+        )
+    else:
+        print(f" Requirement: ≥ {f3_min:.1f} MPa — OK at current wb.")
+
+
     render_detailed_table(out)
+
