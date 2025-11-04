@@ -5,12 +5,13 @@
 # All original math and data structures are preserved.
 # Prints and interactive input() were removed; provide pure functions instead.
 # ---------------------------------------------
-
+import streamlit as st
 import math
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import KNeighborsRegressor
 
+st.write("✅ App booted")
 # ============================================================
 # -------- Configuration: toggle validation vs design --------
 # ============================================================
