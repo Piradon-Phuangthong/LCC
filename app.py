@@ -447,8 +447,18 @@ def material_table(out: dict) -> pd.DataFrame:
 
     df_out = pd.DataFrame(df_rows, columns=["Material", "Density (kg/L)", "Mass (kg)", "Volume (L)"])
     df_out["Mass %"] = 100.0 * df_out["Mass (kg)"] / total_mass
+
+    # ---- format to two decimals (as strings for display) ----
+    df_out["Density (kg/L)"] = df_out["Density (kg/L)"].map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
+    df_out["Mass (kg)"] = df_out["Mass (kg)"].map(lambda x: f"{x:.2f}")
+    df_out["Volume (L)"] = df_out["Volume (L)"].map(lambda x: f"{x:.2f}")
+    df_out["Mass %"] = df_out["Mass %"].map(lambda x: f"{x:.2f}")
+
     avg_density = total_mass / total_vol if total_vol else 0.0
-    df_total = pd.DataFrame([["Total (avg density)", round(avg_density,2), round(total_mass,2), round(total_vol,2), ""]], columns=df_out.columns)
+    df_total = pd.DataFrame(
+        [["Total (avg density)", f"{avg_density:.2f}", f"{total_mass:.2f}", f"{total_vol:.2f}", ""]],
+        columns=df_out.columns
+    )
     return pd.concat([df_out, df_total], ignore_index=True)
 
 if run_btn:
@@ -478,12 +488,13 @@ if run_btn:
     df_mat = material_table(out)
     st.dataframe(df_mat, use_container_width=True, hide_index=True)
 
+    # ---- Aggregates in table format (no graph) ----
     st.subheader("Aggregates (kg/m³)")
     aggs_df = pd.DataFrame({
         "Aggregate": list(out["aggregates_exact"].keys()),
-        "kg/m³": list(out["aggregates_exact"].values())
+        "kg/m³": [f"{v:.2f}" for v in out["aggregates_exact"].values()]
     })
-    st.bar_chart(aggs_df.set_index("Aggregate"))
+    st.dataframe(aggs_df, use_container_width=True, hide_index=True)
 
     st.subheader("Binder Split")
     b = out["binder_exact"]
@@ -492,23 +503,10 @@ if run_btn:
         "kg/m³": [b["Cement"], b["GGBFS"], b["Fly Ash"]]
     })
     binder_split_df["% of binder"] = 100*binder_split_df["kg/m³"]/btot
+    # format to 2 dp for display
+    binder_split_df["kg/m³"] = binder_split_df["kg/m³"].map(lambda x: f"{x:.2f}")
+    binder_split_df["% of binder"] = binder_split_df["% of binder"].map(lambda x: f"{x:.2f}")
     st.dataframe(binder_split_df, use_container_width=True, hide_index=True)
 
     st.divider()
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        st.download_button(
-            "⬇️ Download materials table (CSV)",
-            data=df_mat.to_csv(index=False),
-            file_name="mix_materials_table.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-    with col_dl2:
-        st.download_button(
-            "⬇️ Download full result (JSON)",
-            data=json.dumps(out, indent=2),
-            file_name="mix_design_result.json",
-            mime="application/json",
-            use_container_width=True
-        )
+    # (CSV/JSON download buttons removed as requested)
