@@ -1,12 +1,9 @@
 # app.py
-# Streamlit UI for Strength-Driven Low-Carbon Concrete Mix Designer
-# ---------------------------------------------------------------
-# How to run:
+# Strength-Driven Mix Designer — minimal fixed-water UI
+# Run:
 #   pip install streamlit scikit-learn numpy pandas
-#   (scipy is optional; the code falls back if missing)
 #   streamlit run app.py
 
-import math
 import json
 import numpy as np
 import pandas as pd
@@ -14,47 +11,38 @@ import streamlit as st
 from sklearn.neighbors import KNeighborsRegressor
 
 # ===========================
-# Streamlit page config
+# Page config
 # ===========================
-st.set_page_config(
-    page_title="Strength-Driven Mix Designer",
-    page_icon="🧱",
-    layout="wide"
-)
+st.set_page_config(page_title="Strength-Driven Mix Designer", page_icon="🧱", layout="wide")
+st.title("🧱 Strength-Driven Mix Designer")
+st.caption("Fixed-water workflow • Spreadsheet-style aggregates & EC • Curve+KNN w/b prediction")
 
-st.title("🧱 Strength-Driven Mix Designer (Curve + KNN • Spreadsheet EC)")
-st.caption("Your core calculator, wrapped in a simple Streamlit UI.")
+# ===========================
+# Core constants (kept simple)
+# ===========================
+WATER_DEFAULT = 190.0               # kg/m³ (fixed-water mode only)
+SHEET_PASTE_EXTRA_LITERS = 15.0     # +15 L allowance identical to your sheet
+SHEET_SUBTRACT_AIR = False          # Excel uses N = 1000 - M (no air subtraction); keep False
+DEFAULT_AIR_PERCENT = 1.9           # %
 
-# ------------------------------------------------------------
-# Defaults (can be overridden via sidebar controls)
-# ------------------------------------------------------------
-USE_FIXED_WATER = True     # True = validation mode; False = design mode (predict water)
-WATER_FIXED = 190.0        # kg/m³ when validation is ON
-
-SHEET_METHOD = True
-SHEET_PASTE_EXTRA_LITERS = 15.0
-SHEET_SUBTRACT_AIR = False
-
-# ============================
+# ===========================
 # Material densities (kg/L)
-# ============================
+# ===========================
 DENSITY = {
     "Water": 1.00,
-    "Cement": 3.11,        # PC
+    "Cement": 3.11,
     "Fly Ash": 2.35,
-    "GGBFS": 2.89,         # Slag
+    "GGBFS": 2.89,
     "20mm Aggregate": 2.61,
     "10mm Aggregate": 2.71,
-    "Man Sand": 2.64,      # manufactured sand
+    "Man Sand": 2.64,
     "Natural Sand": 2.65,
     "Plastiment 30": 1.05,
     "ECO WR": 1.07,
     "Retarder": 1.05,
 }
 
-# From your yellow table (rates). Mapping:
-#  - "Fine Sand"  -> "Natural Sand"
-#  - "Coarse"     -> "Manufactured Sand"
+# --- Aggregate splits by w/b band (your yellow table) ---
 SHEET_SPLITS = {
     0.58: {"20mm": 0.392, "10mm": 0.168, "Nat": 0.264, "Man": 0.176},
     0.50: {"20mm": 0.406, "10mm": 0.174, "Nat": 0.252, "Man": 0.168},
@@ -63,46 +51,13 @@ SHEET_SPLITS = {
 }
 SHEET_SPLIT_HIGH_WB = SHEET_SPLITS[0.58]
 
-# -------- Admixture doses from your sheet (per 100 kg binder) --------
+# -------- Admixture doses (per 100 kg binder) --------
 ADM_DOSE_MASS_PER_100KG = {
-    "Retarder":      0.105,  # All binders
-    "Plastiment 30": 0.315,  # All binders (low-range WR)
-    # ECO WR depends on binder type:
-    "ECO_WR_FA_OR_TERNARY": 0.214,  # FA & ternary (F2, F4, T1, T2)
-    "ECO_WR_PC_OR_SLAG":    0.535,  # GP (P1) & Slag blends (S3, S5, S6)
+    "Retarder":      0.105,
+    "Plastiment 30": 0.315,
+    "ECO_WR_FA_OR_TERNARY": 0.214,  # F2, F4, T1, T2
+    "ECO_WR_PC_OR_SLAG":    0.535,  # P1, S3, S5, S6
 }
-
-def _family_uses_flyash(fam_key: str) -> bool:
-    fam = BINDER_FAMILIES.get(fam_key.upper(), {})
-    return (fam.get("Fly Ash", 0.0) or 0.0) > 0.0
-
-def compute_admixtures_from_sheet(binder_total_kg_m3: float, fam_key: str):
-    scale = binder_total_kg_m3 / 100.0
-    ret_kg   = ADM_DOSE_MASS_PER_100KG["Retarder"]      * scale
-    plast_kg = ADM_DOSE_MASS_PER_100KG["Plastiment 30"] * scale
-    eco_key  = "ECO_WR_FA_OR_TERNARY" if _family_uses_flyash(fam_key) else "ECO_WR_PC_OR_SLAG"
-    eco_kg   = ADM_DOSE_MASS_PER_100KG[eco_key] * scale
-    return plast_kg, eco_kg, ret_kg
-
-def _wb_band_split(wb: float):
-    if wb >= 0.58: key = 0.58
-    elif wb >= 0.50: key = 0.50
-    elif wb >= 0.42: key = 0.42
-    else: key = 0.34
-    return SHEET_SPLITS[key]
-
-def _paste_volume_liters(water_kg, c_kg, s_kg, fa_kg, densities=DENSITY):
-    return (water_kg/densities["Water"]
-            + c_kg/densities["Cement"]
-            + s_kg/densities["GGBFS"]
-            + fa_kg/densities["Fly Ash"]
-            + SHEET_PASTE_EXTRA_LITERS)
-
-def _combined_agg_density_kg_per_L(split, densities=DENSITY):
-    return (split["20mm"]*densities["20mm Aggregate"]
-            + split["10mm"]*densities["10mm Aggregate"]
-            + split["Man"] *densities["Man Sand"]
-            + split["Nat"] *densities["Natural Sand"])
 
 # ============================================================
 # Dataset (45 mixes)
@@ -187,11 +142,6 @@ df["_family"] = [_closest_family(s, f) for s, f in zip(df["_slag_frac"], df["_fl
 def _power_model(x, A, b):
     return A * (x ** b)
 
-def _r2_linear(y_true, y_pred):
-    ss_res = float(np.sum((y_true - y_pred) ** 2))
-    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
-    return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-
 def fit_abram_curve(df_sub):
     """
     Fit f28 = A * (w/b)^b in LINEAR space (minimizes absolute strength error).
@@ -262,21 +212,6 @@ def predict_f3_from_wb(wb: float, fam_key: str) -> float:
     s = float(fam.get("GGBFS", 0.0)); f = float(fam.get("Fly Ash", 0.0))
     return float(knn_f3_global.predict([[wb, s, f]])[0])
 
-def recommend_wb_for_f3(target_f3: float, fam_key: str, wb_start: float) -> float:
-    cur = predict_f3_from_wb(wb_start, fam_key)
-    if cur >= target_f3:
-        return round(wb_start, 3)
-    lo, hi = 0.34, max(0.34, min(0.75, wb_start))
-    if predict_f3_from_wb(lo, fam_key) < target_f3:
-        return round(lo, 3)
-    for _ in range(40):
-        mid = 0.5 * (lo + hi)
-        if predict_f3_from_wb(mid, fam_key) >= target_f3:
-            lo = mid
-        else:
-            hi = mid
-    return round(hi, 3)
-
 def _wb_from_curve(f28, fam_key):
     A, b = family_curves.get(fam_key, (A_g, b_g))
     if abs(b) < 1e-9:
@@ -288,10 +223,14 @@ def _wb_from_knn(f28, fam_key):
     if mdl is None:
         return None
     fmin, fmax = wb_ranges[fam_key]
-    f_in = min(max(float(f28), fmin), fmax)
+    f_in = min(max(float(f28), fmin), fmax)  # clamp to training span
     return float(mdl.predict([[f_in]])[0])
 
 def predict_wb_from_f28_curve(f28, fam_key):
+    """
+    Blend data-driven inverse with curve; lean on data at low strengths.
+    At <=40 MPa: ~70% data, >=60 MPa: ~40% data. Caps w/b at 0.75.
+    """
     wb_curve = _wb_from_curve(f28, fam_key)
     wb_knn = _wb_from_knn(f28, fam_key)
     if wb_knn is None:
@@ -300,63 +239,11 @@ def predict_wb_from_f28_curve(f28, fam_key):
         f = float(f28)
         w_data = 0.7 if f <= 40 else (0.4 if f >= 60 else 0.7 - (0.3*(f-40)/20.0))
         wb = w_data*wb_knn + (1.0 - w_data)*wb_curve
-    return max(0.34, min(0.75, wb))
+    return max(0.34, min(0.75, wb))  # reasonable bound
 
 def implied_f28_from_wb(wb, fam_key):
     A, b = family_curves.get(fam_key, (A_g, b_g))
     return float(A * (wb ** b))
-
-# ============================================================
-# Water prediction model (used only in design mode)
-# ============================================================
-family_models_water = {}
-for fam in BINDER_FAMILIES.keys():
-    sub = df[df["_family"] == fam]
-    if len(sub) >= 2:
-        family_models_water[fam] = KNeighborsRegressor(n_neighbors=3, weights="distance") \
-            .fit(sub[["Strength3d","Strength28d","Water/Binder"]].values, sub["Free Water"].values)
-
-knn_water_global = KNeighborsRegressor(n_neighbors=3, weights="distance") \
-    .fit(df[["Strength3d","Strength28d","Water/Binder"]].values, df["Free Water"].values)
-
-W_MIN, W_MAX = float(df["Free Water"].min()), float(df["Free Water"].max())
-
-def get_water(f3, f28, wb, fam_key):
-    if st.session_state.get("use_fixed_water", USE_FIXED_WATER):
-        return st.session_state.get("water_fixed", WATER_FIXED)
-    mdl_w = family_models_water.get(fam_key, knn_water_global)
-    w = float(mdl_w.predict([[f3, f28, wb]])[0])
-    return max(W_MIN, min(W_MAX, w))
-
-# ============================================================
-# Aggregate templates by w/b family (fallback path retained)
-# ============================================================
-wb_families = [
-    (0.57, (726, 318, 333, 497), 2407, 1.8),
-    (0.50, (720, 315, 315, 462), 2390, 1.8),
-    (0.42, (718, 314, 294, 441), 2420, 1.9),
-    (0.34, (727, 318, 252, 374), 2442, 1.4),
-    (0.66, (721, 317, 346, 516), 2392, 1.9),
-]
-def nearest_family(wb):
-    return min(wb_families, key=lambda t: abs(t[0] - wb))
-
-def _normalized_split_from_template(center_wb):
-    for cw, (a20, a10, ms, ns), _, _ in wb_families:
-        if abs(cw - center_wb) < 1e-6:
-            s = a20 + a10 + ms + ns
-            return {"20mm": a20/s, "10mm": a10/s, "Man": ms/s, "Nat": ns/s}
-    return SHEET_SPLIT_HIGH_WB
-
-def _split_for_wb_band(wb):
-    if wb >= 0.58:
-        return SHEET_SPLIT_HIGH_WB
-    elif 0.50 <= wb < 0.58:
-        return _normalized_split_from_template(0.50)
-    elif 0.42 <= wb < 0.50:
-        return _normalized_split_from_template(0.42)
-    else:
-        return _normalized_split_from_template(0.34)
 
 # ============================================================
 # Spreadsheet EC factors (kg CO2e per kg material)
@@ -375,6 +262,39 @@ EF_PER_KG = {
     "Retarder": 2.2000,
 }
 
+# -------- helpers for sheet-identical paste/agg math ----------
+def _wb_band_split(wb: float):
+    if wb >= 0.58: key = 0.58
+    elif wb >= 0.50: key = 0.50
+    elif wb >= 0.42: key = 0.42
+    else: key = 0.34
+    return SHEET_SPLITS[key]
+
+def _paste_volume_liters(water_kg, c_kg, s_kg, fa_kg):
+    return (water_kg/DENSITY["Water"]
+            + c_kg/DENSITY["Cement"]
+            + s_kg/DENSITY["GGBFS"]
+            + fa_kg/DENSITY["Fly Ash"]
+            + SHEET_PASTE_EXTRA_LITERS)
+
+def _combined_agg_density_kg_per_L(split):
+    return (split["20mm"]*DENSITY["20mm Aggregate"]
+            + split["10mm"]*DENSITY["10mm Aggregate"]
+            + split["Man"] *DENSITY["Man Sand"]
+            + split["Nat"] *DENSITY["Natural Sand"])
+
+def _family_uses_flyash(fam_key: str) -> bool:
+    fam = BINDER_FAMILIES.get(fam_key.upper(), {})
+    return (fam.get("Fly Ash", 0.0) or 0.0) > 0.0
+
+def compute_admixtures_from_sheet(binder_total_kg_m3: float, fam_key: str):
+    scale = binder_total_kg_m3 / 100.0
+    ret_kg   = ADM_DOSE_MASS_PER_100KG["Retarder"]      * scale
+    plast_kg = ADM_DOSE_MASS_PER_100KG["Plastiment 30"] * scale
+    eco_key  = "ECO_WR_FA_OR_TERNARY" if _family_uses_flyash(fam_key) else "ECO_WR_PC_OR_SLAG"
+    eco_kg   = ADM_DOSE_MASS_PER_100KG[eco_key] * scale
+    return plast_kg, eco_kg, ret_kg
+
 def compute_ec_from_mix_spreadsheet(water, binder_split, aggs, admix_tuple):
     ec = 0.0
     ec += water * EF_PER_KG["Water"]
@@ -392,16 +312,16 @@ def compute_ec_from_mix_spreadsheet(water, binder_split, aggs, admix_tuple):
     return ec
 
 # ============================================================
-# Core design function
+# Core design function (fixed-water)
 # ============================================================
-def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5"):
+def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5", water_fixed=WATER_DEFAULT):
     fam_key = binder_family_key.upper()
 
     # 1) w/b from f28 (blended inverse)
     wb_pred = predict_wb_from_f28_curve(f28_min, fam_key)
 
-    # 2) Water (fixed or predicted)
-    water_pred = get_water(f3_min, f28_min, wb_pred, fam_key)
+    # 2) Water: fixed input
+    water_pred = float(water_fixed)
 
     # 3) Binder total + split per family
     binder_total = water_pred / wb_pred
@@ -414,30 +334,21 @@ def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5"):
     plast, eco, ret = compute_admixtures_from_sheet(binder_total, fam_key)
     adm_total = plast + eco + ret
 
-    # 5) Aggregates from sheet logic (or template fallback)
-    if st.session_state.get("sheet_method", SHEET_METHOD):
-        split = _wb_band_split(wb_pred)
-        V_paste_L = _paste_volume_liters(water_pred, c, s, fa)
-        air_pct = st.session_state.get("air_percent", 1.9)
-        V_air_L = (air_pct/100.0) * 1000.0
-        V_agg_L = max(0.0, 1000.0 - V_paste_L - (V_air_L if st.session_state.get("sheet_subtract_air", SHEET_SUBTRACT_AIR) else 0.0))
-        rho_agg_kg_per_L = _combined_agg_density_kg_per_L(split)
+    # 5) Aggregates from sheet logic
+    split = _wb_band_split(wb_pred)
+    V_paste_L = _paste_volume_liters(water_pred, c, s, fa)
+    air_pct = DEFAULT_AIR_PERCENT
+    V_air_L = (air_pct/100.0) * 1000.0
+    V_agg_L = max(0.0, 1000.0 - V_paste_L - (V_air_L if SHEET_SUBTRACT_AIR else 0.0))
+    rho_agg_kg_per_L = _combined_agg_density_kg_per_L(split)
 
-        M_agg_total = V_agg_L * rho_agg_kg_per_L
-        a20 = M_agg_total * split["20mm"]
-        a10 = M_agg_total * split["10mm"]
-        ms  = M_agg_total * split["Man"]
-        ns  = M_agg_total * split["Nat"]
+    M_agg_total = V_agg_L * rho_agg_kg_per_L
+    a20 = M_agg_total * split["20mm"]
+    a10 = M_agg_total * split["10mm"]
+    ms  = M_agg_total * split["Man"]
+    ns  = M_agg_total * split["Nat"]
 
-        rho_target = water_pred + binder_total + adm_total + M_agg_total
-        center_wb = wb_pred
-    else:
-        center_wb, (a20_b, a10_b, ms_b, ns_b), rho_target, air_pct = nearest_family(wb_pred)
-        base_ag = a20_b + a10_b + ms_b + ns_b
-        non_ag = water_pred + binder_total + adm_total
-        aggs_needed = max(0.0, rho_target - non_ag)
-        scale = aggs_needed/base_ag if base_ag > 0 else 1.0
-        a20, a10, ms, ns = a20_b*scale, a10_b*scale, ms_b*scale, ns_b*scale
+    rho_target = water_pred + binder_total + adm_total + M_agg_total
 
     # 6) EC
     ec_calc = compute_ec_from_mix_spreadsheet(
@@ -450,14 +361,13 @@ def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5"):
     total_mass = water_pred + binder_total + (a20 + a10 + ms + ns) + adm_total
 
     return {
-        "inputs": {"min_3d_MPa": f3_min, "min_28d_MPa": f28_min, "binder_family": fam_key},
+        "inputs": {"min_3d_MPa": f3_min, "min_28d_MPa": f28_min, "binder_family": fam_key, "water_fixed": water_fixed},
         "predicted_parameters": {
             "water_binder_ratio": wb_pred,
             "water_kg_m3": water_pred,
             "binder_total_kg_m3": binder_total,
             "fresh_density_target_kg_m3": rho_target,  # "Sum Concrete"
             "air_percent": air_pct,
-            "wb_family_center": center_wb,
         },
         "binder_exact": {"Cement": c, "GGBFS": s, "Fly Ash": fa},
         "admixture_split_kg_m3": {"Plastiment 30": plast, "ECO WR": eco, "Retarder": ret},
@@ -467,41 +377,39 @@ def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5"):
     }
 
 # ============================================================
-# Sidebar controls
+# Sidebar — Fixed water + family + strengths
 # ============================================================
 with st.sidebar:
-    st.header("⚙️ Configuration")
-
-    mode = st.radio(
-        "Mode",
-        options=["Validation (fixed water)", "Design (predict water)"],
-        index=0 if USE_FIXED_WATER else 1
-    )
-    st.session_state["use_fixed_water"] = (mode == "Validation (fixed water)")
-
-    if st.session_state["use_fixed_water"]:
-        st.session_state["water_fixed"] = st.number_input("Fixed water (kg/m³)", 120.0, 240.0, WATER_FIXED, 1.0)
-
-    st.divider()
-    st.session_state["sheet_method"] = st.toggle("Use spreadsheet aggregate method", value=SHEET_METHOD)
-    st.session_state["sheet_subtract_air"] = st.toggle("Subtract air before sizing aggregates", value=SHEET_SUBTRACT_AIR)
-    st.session_state["paste_extra_liters"] = st.number_input("Paste + extra allowance (L)", 0.0, 40.0, SHEET_PASTE_EXTRA_LITERS, 1.0)
-    SHEET_PASTE_EXTRA_LITERS = st.session_state["paste_extra_liters"]  # bind to global used in calc
-
-    st.session_state["air_percent"] = st.number_input("Air content (%)", 0.0, 6.0, 1.9, 0.1)
-
-    st.divider()
+    st.header("Inputs")
+    water_fixed = st.number_input("Fixed water (kg/m³)", 120.0, 240.0, WATER_DEFAULT, 1.0)
     fam_keys = list(BINDER_FAMILIES.keys())
     default_idx = fam_keys.index("S5") if "S5" in fam_keys else 0
     fam = st.selectbox("Binder family", fam_keys, index=default_idx)
-
     colA, colB = st.columns(2)
     with colA:
-        f3_min = st.number_input("Minimum 3-day strength (MPa)", 5.0, 80.0, 30.0, 0.5)
+        f3_min = st.number_input("3-day strength (MPa)", 5.0, 80.0, 30.0, 0.5)
     with colB:
-        f28_min = st.number_input("Minimum 28-day strength (MPa)", 10.0, 100.0, 50.0, 0.5)
-
+        f28_min = st.number_input("28-day strength (MPa)", 10.0, 100.0, 50.0, 0.5)
     run_btn = st.button("Design mix", type="primary", use_container_width=True)
+
+# ============================================================
+# Binder family mixes panel (replaces the old help menu)
+# ============================================================
+def _family_percent_rows():
+    rows = []
+    for k, v in BINDER_FAMILIES.items():
+        slag = 100.0 * v.get("GGBFS", 0.0)
+        fly  = 100.0 * v.get("Fly Ash", 0.0)
+        cem  = max(0.0, 100.0 - slag - fly)
+        rows.append((k, cem, slag, fly))
+    order = ["P1","F2","F4","S3","S5","S6","T1","T2"]
+    rows.sort(key=lambda r: order.index(r[0]) if r[0] in order else 999)
+    return rows
+
+with st.expander("Binder family mixes (percent of total binder)", expanded=True):
+    rows = _family_percent_rows()
+    fam_table = pd.DataFrame(rows, columns=["Family", "Cement %", "GGBFS %", "Fly Ash %"])
+    st.dataframe(fam_table, use_container_width=True, hide_index=True)
 
 # ============================================================
 # Main UI
@@ -525,16 +433,14 @@ def material_table(out: dict) -> pd.DataFrame:
         ("ECO WR", DENSITY["ECO WR"], adm["ECO WR"]),
         ("Retarder", DENSITY["Retarder"], adm["Retarder"]),
     ]
-    df_rows = []
-    total_mass = 0.0
-    total_vol = 0.0
+    df_rows, total_mass, total_vol = [], 0.0, 0.0
     for name, dens, mass in rows:
         vol = mass/dens if dens > 0 else 0.0
         df_rows.append([name, dens, mass, vol])
         total_mass += mass
         total_vol += vol
 
-    # Add Air row
+    # Air row
     air_vol_L = (out["predicted_parameters"]["air_percent"]/100.0)*1000.0
     df_rows.append(["Air", np.nan, 0.0, air_vol_L])
     total_vol += air_vol_L
@@ -542,13 +448,11 @@ def material_table(out: dict) -> pd.DataFrame:
     df_out = pd.DataFrame(df_rows, columns=["Material", "Density (kg/L)", "Mass (kg)", "Volume (L)"])
     df_out["Mass %"] = 100.0 * df_out["Mass (kg)"] / total_mass
     avg_density = total_mass / total_vol if total_vol else 0.0
-
-    # Append a total row (for display only)
     df_total = pd.DataFrame([["Total (avg density)", round(avg_density,2), round(total_mass,2), round(total_vol,2), ""]], columns=df_out.columns)
     return pd.concat([df_out, df_total], ignore_index=True)
 
 if run_btn:
-    out = design_mix_from_strengths_min(f3_min, f28_min, fam)
+    out = design_mix_from_strengths_min(f3_min, f28_min, fam, water_fixed)
 
     pp = out["predicted_parameters"]
     wb   = pp["water_binder_ratio"]
@@ -566,27 +470,14 @@ if run_btn:
     c2.metric("Air (%)", f"{pp['air_percent']:.1f}")
     c3.metric("EC (kg CO₂e/m³)", f"{out['embodied_carbon']['calculated_from_EF_spreadsheet']:.1f}")
 
-    # 3-day reporting + recommendation
+    # 3-day prediction from wb (reporting only)
     f3_pred_report = predict_f3_from_wb(wb, fam)
-    st.subheader("3-Day Strength Check (reporting only)")
-    if f3_pred_report + 1e-9 < f3_min:
-        wb_rec = recommend_wb_for_f3(f3_min, fam, wb)
-        f3_at_rec  = predict_f3_from_wb(wb_rec, fam)
-        f28_at_rec = implied_f28_from_wb(wb_rec, fam)
-        st.warning(
-            f"Predicted f3 ≈ **{f3_pred_report:.1f} MPa** < target **{f3_min:.1f} MPa**.\n\n"
-            f"**Recommended w/b:** {wb_rec:.3f} → f3 ≈ {f3_at_rec:.1f} MPa, f28 ≈ {f28_at_rec:.1f} MPa "
-            "(design remains unchanged; this is a suggestion)."
-        )
-    else:
-        st.success(f"Predicted f3 ≈ **{f3_pred_report:.1f} MPa** ≥ target **{f3_min:.1f} MPa** — OK at current w/b.")
+    st.info(f"Predicted 3-day ≈ **{f3_pred_report:.1f} MPa** at w/b = {wb:.3f} (input target: {f3_min:.1f} MPa)")
 
-    st.divider()
     st.subheader("Detailed Materials Table")
     df_mat = material_table(out)
     st.dataframe(df_mat, use_container_width=True, hide_index=True)
 
-    # Aggregates chart
     st.subheader("Aggregates (kg/m³)")
     aggs_df = pd.DataFrame({
         "Aggregate": list(out["aggregates_exact"].keys()),
@@ -594,7 +485,6 @@ if run_btn:
     })
     st.bar_chart(aggs_df.set_index("Aggregate"))
 
-    # Binder split display
     st.subheader("Binder Split")
     b = out["binder_exact"]
     binder_split_df = pd.DataFrame({
@@ -604,7 +494,6 @@ if run_btn:
     binder_split_df["% of binder"] = 100*binder_split_df["kg/m³"]/btot
     st.dataframe(binder_split_df, use_container_width=True, hide_index=True)
 
-    # Downloads
     st.divider()
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
@@ -623,15 +512,3 @@ if run_btn:
             mime="application/json",
             use_container_width=True
         )
-
-# Helpful reference panel
-with st.expander("What does this tool do?"):
-    st.markdown("""
-- **Inputs:** target strengths (3-day, 28-day) and **binder family** (P1, F2, F4, S3, S5, S6, T1, T2).
-- **w/b prediction:** blends a fitted Abram-type curve with KNN inverse models (leans on data at low strengths).
-- **Water:** fixed (Validation) or data-driven (Design).
-- **Aggregates:** spreadsheet-identical volumetric closure (with +15 L paste allowance, configurable), or template fallback.
-- **Admixtures:** per-100-kg binder doses (sheet-accurate).
-- **EC:** computed with your NSW-specific factors.
-- **3-day check:** reports predicted f3 and suggests a minimal w/b tightening if needed (no auto changes).
-""")
