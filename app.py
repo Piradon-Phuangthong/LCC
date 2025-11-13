@@ -397,11 +397,11 @@ with st.sidebar:
     fam = st.selectbox("Binder family", fam_keys, index=default_idx)
 
     st.divider()
-    use_manual_wb = st.checkbox("Set w/b Manually (ignores 28d strength)")
+    use_manual_wb = st.checkbox("Set w/b Manually (ignores strength targets)")
 
     colA, colB = st.columns(2)
     with colA:
-        f3_min = st.number_input("3-day strength (MPa)", 5.0, 80.0, 30.0, 0.5)
+        f3_min = st.number_input("3-day strength (MPa)", 5.0, 80.0, 30.0, 0.5, disabled=use_manual_wb)
     with colB:
         f28_min = st.number_input("28-day strength (MPa)", 10.0, 100.0, 50.0, 0.5, disabled=use_manual_wb)
 
@@ -502,7 +502,12 @@ if run_btn:
 
     # 3-day prediction from wb (reporting only)
     f3_pred_report = predict_f3_from_wb(wb, fam)
-    st.info(f"Predicted 3-day ≈ **{f3_pred_report:.1f} MPa** at w/b = {wb:.3f} (input target: {f3_min:.1f} MPa)")
+    
+    # Adjust info message based on manual w/b
+    if out["inputs"]["use_manual_wb"]:
+        st.info(f"Predicted 3-day ≈ **{f3_pred_report:.1f} MPa** at w/b = {wb:.3f} (3d target was ignored)")
+    else:
+        st.info(f"Predicted 3-day ≈ **{f3_pred_report:.1f} MPa** at w/b = {wb:.3f} (input target: {f3_min:.1f} MPa)")
 
     # Show predicted 28-day strength if w/b was manual
     if out["inputs"]["use_manual_wb"]:
@@ -534,4 +539,4 @@ if run_btn:
     st.dataframe(binder_split_df, use_container_width=True, hide_index=True)
 
     st.divider()
-    # (CSV/JSON download buttons removed as requested)
+    
