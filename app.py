@@ -314,11 +314,14 @@ def compute_ec_from_mix_spreadsheet(water, binder_split, aggs, admix_tuple):
 # ============================================================
 # Core design function (fixed-water)
 # ============================================================
-def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5", water_fixed=WATER_DEFAULT):
+def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5", water_fixed=WATER_DEFAULT, use_manual_wb=False, manual_wb_value=0.5):
     fam_key = binder_family_key.upper()
 
-    # 1) w/b from f28 (blended inverse)
-    wb_pred = predict_wb_from_f28_curve(f28_min, fam_key)
+    # 1) w/b from f28 (blended inverse) OR manual override
+    if use_manual_wb:
+        wb_pred = float(manual_wb_value)
+    else:
+        wb_pred = predict_wb_from_f28_curve(f28_min, fam_key)
 
     # 2) Water: fixed input
     water_pred = float(water_fixed)
@@ -361,7 +364,14 @@ def design_mix_from_strengths_min(f3_min, f28_min, binder_family_key="S5", water
     total_mass = water_pred + binder_total + (a20 + a10 + ms + ns) + adm_total
 
     return {
-        "inputs": {"min_3d_MPa": f3_min, "min_28d_MPa": f28_min, "binder_family": fam_key, "water_fixed": water_fixed},
+        "inputs": {
+            "min_3d_MPa": f3_min, 
+            "min_28d_MPa": f28_min, 
+            "binder_family": fam_key, 
+            "water_fixed": water_fixed,
+            "use_manual_wb": use_manual_wb,
+            "manual_wb_value": manual_wb_value if use_manual_wb else None
+        },
         "predicted_parameters": {
             "water_binder_ratio": wb_pred,
             "water_kg_m3": water_pred,
@@ -385,11 +395,18 @@ with st.sidebar:
     fam_keys = list(BINDER_FAMILIES.keys())
     default_idx = fam_keys.index("S5") if "S5" in fam_keys else 0
     fam = st.selectbox("Binder family", fam_keys, index=default_idx)
+
+    st.divider()
+    use_manual_wb = st.checkbox("Set w/b Manually (ignores 28d strength)")
+
     colA, colB = st.columns(2)
     with colA:
         f3_min = st.number_input("3-day strength (MPa)", 5.0, 80.0, 30.0, 0.5)
     with colB:
-        f28_min = st.number_input("28-day strength (MPa)", 10.0, 100.0, 50.0, 0.5)
+        f28_min = st.number_input("28-day strength (MPa)", 10.0, 100.0, 50.0, 0.5, disabled=use_manual_wb)
+
+    wb_manual = st.number_input("Manual w/b Ratio", 0.30, 0.80, 0.45, 0.01, disabled=not use_manual_wb)
+
     run_btn = st.button("Design mix", type="primary", use_container_width=True)
 
 # ============================================================
@@ -462,7 +479,7 @@ def material_table(out: dict) -> pd.DataFrame:
     return pd.concat([df_out, df_total], ignore_index=True)
 
 if run_btn:
-    out = design_mix_from_strengths_min(f3_min, f28_min, fam, water_fixed)
+    out = design_mix_from_strengths_min(f3_min, f28_min, fam, water_fixed, use_manual_wb, wb_manual)
 
     pp = out["predicted_parameters"]
     wb   = pp["water_binder_ratio"]
@@ -471,7 +488,10 @@ if run_btn:
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Binder family", out["inputs"]["binder_family"])
-    m2.metric("w/b (curve+data)", f"{wb:.3f}")
+    
+    wb_label = "w/b (Manual)" if out["inputs"]["use_manual_wb"] else "w/b (curve+data)"
+    m2.metric(wb_label, f"{wb:.3f}")
+
     m3.metric("Water (kg/m³)", f"{water:.1f}")
     m4.metric("Binder total (kg/m³)", f"{btot:.1f}")
 
