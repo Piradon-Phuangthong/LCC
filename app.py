@@ -504,6 +504,11 @@ if run_btn:
     f3_pred_report = predict_f3_from_wb(wb, fam)
     st.info(f"Predicted 3-day ≈ **{f3_pred_report:.1f} MPa** at w/b = {wb:.3f} (input target: {f3_min:.1f} MPa)")
 
+    # Show predicted 28-day strength if w/b was manual
+    if out["inputs"]["use_manual_wb"]:
+        f28_pred_report = implied_f28_from_wb(wb, fam)
+        st.success(f"Predicted 28-day ≈ **{f28_pred_report:.1f} MPa** at w/b = {wb:.3f} (28d target was ignored)")
+
     st.subheader("Detailed Materials Table")
     df_mat = material_table(out)
     st.dataframe(df_mat, use_container_width=True, hide_index=True)
