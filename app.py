@@ -1,33 +1,69 @@
 # app.py
-# Strength-Driven Mix Designer — Streamlit UI
+# Low-Carbon Concrete Mix Design Tool — Streamlit UI
 # Run:
 #   pip install streamlit scikit-learn numpy pandas scipy
 #   streamlit run app.py
 
-import json
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.neighbors import KNeighborsRegressor
 
-# ===========================
-# Page config
-# ===========================
-st.set_page_config(page_title="Strength-Driven Mix Designer", page_icon="🧱", layout="wide")
-st.title("🧱 Strength-Driven Mix Designer")
-st.caption("Spreadsheet-style aggregates • Curve+KNN w/b prediction • Report-aligned EC (A1+A2+A3)")
+# =============================================================================
+# Page configuration (professional / neutral)
+# =============================================================================
+st.set_page_config(
+    page_title="Low-Carbon Concrete Mix Design Tool",
+    page_icon="🏛️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# ===========================
-# Core constants
-# ===========================
+# -----------------------------------------------------------------------------
+# High-level header (government-friendly tone)
+# -----------------------------------------------------------------------------
+st.title("Low-Carbon Concrete Mix Design Tool")
+st.write(
+    "This tool estimates concrete mix proportions based on minimum strength targets and selected binder family, "
+    "and reports embodied carbon using a report-aligned A1–A3 method."
+)
+
+with st.expander("Method and limitations (read first)", expanded=False):
+    st.markdown(
+        """
+**Purpose**  
+This is a research prototype intended to support early-stage mix exploration and reporting consistency.
+
+**Method summary**  
+- Strength → water/binder ratio predicted using a blend of fitted curve + data-driven inverse model.
+- Water content can be fixed (validation mode) or estimated via KNN.
+- Aggregate sizing uses a spreadsheet-style absolute volume approach with a +15 L paste allowance.
+- Embodied carbon is reported as **EC = A1 + A2 + A3**:
+  - **A1**: material factors (kgCO₂/kg)
+  - **A2**: transport (truck + sea) using fixed distances and EFs
+  - **A3**: constant manufacturing emissions (kgCO₂/m³)
+
+**Limitations**  
+- Outputs are indicative and depend on the representativeness of the underlying experimental dataset.
+- This tool does not replace detailed mix trials, standards compliance checks, or procurement-specific EPDs.
+"""
+    )
+
+st.divider()
+
+# =============================================================================
+# Core constants (keep your existing logic)
+# =============================================================================
 WATER_DEFAULT = 190.0               # kg/m³ (fixed-water mode default)
 SHEET_PASTE_EXTRA_LITERS = 15.0     # +15 L allowance identical to your sheet
-SHEET_SUBTRACT_AIR = False          # Excel uses Vagg = 1000 - Vpaste (no air subtraction); keep False
+SHEET_SUBTRACT_AIR = False          # Excel uses Vagg = 1000 - Vpaste (no air subtraction)
 DEFAULT_AIR_PERCENT = 1.9           # %
 
-# ===========================
+# =============================================================================
 # Material densities (kg/L)
-# ===========================
+# =============================================================================
 DENSITY = {
     "Water": 1.00,
     "Cement": 3.11,
@@ -42,7 +78,7 @@ DENSITY = {
     "Retarder": 1.05,
 }
 
-# --- Aggregate splits by w/b band (your yellow table) ---
+# --- Aggregate splits by w/b band (yellow table) ---
 SHEET_SPLITS = {
     0.58: {"20mm": 0.392, "10mm": 0.168, "Nat": 0.264, "Man": 0.176},
     0.50: {"20mm": 0.406, "10mm": 0.174, "Nat": 0.252, "Man": 0.168},
@@ -58,9 +94,9 @@ ADM_DOSE_MASS_PER_100KG = {
     "ECO_WR_PC_OR_SLAG":    0.535,  # P1, S3, S5, S6
 }
 
-# ============================================================
-# Dataset (45 mixes)
-# ============================================================
+# =============================================================================
+# Dataset (45 mixes) — unchanged
+# =============================================================================
 data2 = {
     "Water/Binder": [0.57,0.57,0.57,0.58,0.57,0.57,0.57,0.55,0.54,
                      0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.44,0.47,
@@ -98,7 +134,7 @@ data2 = {
                     83.3,78.6,74.5,72.9,72.7,67.3,56.4,61.9,61.8,
                     34.6,30.6,28.9,24.3,36.8,35.3,29.8,31.3,28.1]
 }
-# Keep original EC_exp list (for reference only; design uses report-aligned EC)
+# Original EC list kept (reference only)
 ec_list = [358,280,235,206,275,233,199,197,168,
            403,318,268,233,310,269,222,226,190,
            470,366,307,267,366,306,258,261,218,
@@ -107,9 +143,9 @@ ec_list = [358,280,235,206,275,233,199,197,168,
 df = pd.DataFrame(data2)
 df["EC_exp"] = ec_list
 
-# ============================================================
-# Binder families (mass fractions of binder)
-# ============================================================
+# =============================================================================
+# Binder families
+# =============================================================================
 BINDER_FAMILIES = {
     "P1": {"GGBFS": 0.00, "Fly Ash": 0.00},
     "F2": {"GGBFS": 0.00, "Fly Ash": 0.25},
@@ -122,31 +158,27 @@ BINDER_FAMILIES = {
 }
 FAMILY_PROTOTYPES = {k: (v["GGBFS"], v["Fly Ash"]) for k, v in BINDER_FAMILIES.items()}
 
-def _closest_family(slag_frac, fly_frac):
+def _closest_family(slag_frac: float, fly_frac: float) -> str:
     best_key, best_dist = None, 1e9
     for k, (s, f) in FAMILY_PROTOTYPES.items():
         d = (slag_frac - s) ** 2 + (fly_frac - f) ** 2
         if d < best_dist:
             best_key, best_dist = k, d
-    return best_key
+    return str(best_key)
 
-# Label dataset rows by nearest (slag%, fly%)
+# label dataset rows by nearest (slag%, fly%)
 binder_sum = (df["Cement"] + df["GGBFS"] + df["Fly Ash"]).replace(0, 1e-9)
 df["_slag_frac"] = df["GGBFS"] / binder_sum
 df["_fly_frac"]  = df["Fly Ash"] / binder_sum
 df["_family"] = [_closest_family(s, f) for s, f in zip(df["_slag_frac"], df["_fly_frac"])]
 
-# ============================================================
-# Abram-style curves per family: fit in LINEAR space
-# ============================================================
+# =============================================================================
+# Abram-style curve fitting (unchanged logic)
+# =============================================================================
 def _power_model(x, A, b):
     return A * (x ** b)
 
-def fit_abram_curve(df_sub):
-    """
-    Fit f28 = A * (w/b)^b in LINEAR space (minimizes absolute strength error).
-    Falls back to log–log fit if SciPy isn't available.
-    """
+def fit_abram_curve(df_sub: pd.DataFrame):
     x = df_sub["Water/Binder"].values.astype(float)
     y = df_sub["Strength28d"].values.astype(float)
     m = (x > 0) & (y > 0)
@@ -171,7 +203,7 @@ def fit_abram_curve(df_sub):
             b = -1.9
         return float(A), float(b)
 
-# === Family-level inverse models: Strength28d -> Water/Binder ===
+# inverse KNN models: Strength28d -> w/b
 wb_inv_models = {}
 wb_ranges = {}
 for fam in BINDER_FAMILIES.keys():
@@ -182,7 +214,7 @@ for fam in BINDER_FAMILIES.keys():
         wb_inv_models[fam] = mdl
         wb_ranges[fam] = (float(sub["Strength28d"].min()), float(sub["Strength28d"].max()))
 
-# === Build family-specific curves and global fallback ===
+# family curves + global fallback
 family_curves = {}
 for fam in BINDER_FAMILIES.keys():
     sub = df[df["_family"] == fam]
@@ -190,19 +222,16 @@ for fam in BINDER_FAMILIES.keys():
         family_curves[fam] = fit_abram_curve(sub)
 A_g, b_g = fit_abram_curve(df)
 
-# === 3-day strength models (reporting only; used for optional enforcement) ===
+# 3-day strength models
 family_models_f3 = {}
 for fam in BINDER_FAMILIES.keys():
     sub = df[df["_family"] == fam][["Water/Binder", "Strength3d"]].dropna()
     if len(sub) >= 2:
-        family_models_f3[fam] = KNeighborsRegressor(
-            n_neighbors=min(4, len(sub)), weights="distance"
-        ).fit(sub[["Water/Binder"]].values, sub["Strength3d"].values)
+        family_models_f3[fam] = KNeighborsRegressor(n_neighbors=min(4, len(sub)), weights="distance") \
+            .fit(sub[["Water/Binder"]].values, sub["Strength3d"].values)
 
-# global fallback uses wb + blend fractions
-knn_f3_global = KNeighborsRegressor(n_neighbors=4, weights="distance").fit(
-    df[["Water/Binder", "_slag_frac", "_fly_frac"]].values, df["Strength3d"].values
-)
+knn_f3_global = KNeighborsRegressor(n_neighbors=4, weights="distance") \
+    .fit(df[["Water/Binder", "_slag_frac", "_fly_frac"]].values, df["Strength3d"].values)
 
 def predict_f3_from_wb(wb: float, fam_key: str) -> float:
     mdl = family_models_f3.get(fam_key)
@@ -214,10 +243,6 @@ def predict_f3_from_wb(wb: float, fam_key: str) -> float:
     return float(knn_f3_global.predict([[wb, s, f]])[0])
 
 def recommend_wb_for_f3(target_f3: float, fam_key: str, wb_start: float) -> float:
-    """
-    Return the LARGEST wb that still meets target_f3, searching over [0.34, wb_start].
-    If current wb already meets target, return it.
-    """
     cur = predict_f3_from_wb(wb_start, fam_key)
     if cur >= target_f3:
         return float(round(wb_start, 3))
@@ -234,13 +259,13 @@ def recommend_wb_for_f3(target_f3: float, fam_key: str, wb_start: float) -> floa
             hi = mid
     return float(round(hi, 3))
 
-def _wb_from_curve(f28, fam_key):
+def _wb_from_curve(f28: float, fam_key: str) -> float:
     A, b = family_curves.get(fam_key, (A_g, b_g))
     if abs(b) < 1e-9:
         return 0.50
     return float((max(1e-6, f28) / A) ** (1.0 / b))
 
-def _wb_from_knn(f28, fam_key):
+def _wb_from_knn(f28: float, fam_key: str):
     mdl = wb_inv_models.get(fam_key)
     if mdl is None:
         return None
@@ -248,11 +273,7 @@ def _wb_from_knn(f28, fam_key):
     f_in = min(max(float(f28), fmin), fmax)
     return float(mdl.predict([[f_in]])[0])
 
-def predict_wb_from_f28_curve(f28, fam_key):
-    """
-    Blend data-driven inverse with curve; lean on data at low strengths.
-    At <=40 MPa: ~70% data, >=60 MPa: ~40% data. Caps w/b at 0.75.
-    """
+def predict_wb_from_f28_curve(f28: float, fam_key: str) -> float:
     wb_curve = _wb_from_curve(f28, fam_key)
     wb_knn = _wb_from_knn(f28, fam_key)
     if wb_knn is None:
@@ -263,13 +284,13 @@ def predict_wb_from_f28_curve(f28, fam_key):
         wb = w_data * wb_knn + (1.0 - w_data) * wb_curve
     return max(0.34, min(0.75, wb))
 
-def implied_f28_from_wb(wb, fam_key):
+def implied_f28_from_wb(wb: float, fam_key: str) -> float:
     A, b = family_curves.get(fam_key, (A_g, b_g))
     return float(A * (wb ** b))
 
-# ============================================================
-# Water prediction model (used only when not fixed-water)
-# ============================================================
+# =============================================================================
+# Water prediction model
+# =============================================================================
 family_models_water = {}
 for fam in BINDER_FAMILIES.keys():
     sub = df[df["_family"] == fam]
@@ -282,17 +303,16 @@ knn_water_global = KNeighborsRegressor(n_neighbors=3, weights="distance") \
 
 W_MIN, W_MAX = float(df["Free Water"].min()), float(df["Free Water"].max())
 
-def get_water(f3, f28, wb, fam_key, use_fixed_water: bool, water_fixed: float):
+def get_water(f3: float, f28: float, wb: float, fam_key: str, use_fixed_water: bool, water_fixed: float) -> float:
     if use_fixed_water:
         return float(water_fixed)
     mdl_w = family_models_water.get(fam_key, knn_water_global)
     w = float(mdl_w.predict([[float(f3), float(f28), float(wb)]])[0])
     return float(max(W_MIN, min(W_MAX, w)))
 
-# ============================================================
+# =============================================================================
 # Report-aligned EC method (A1 + A2 + A3)
-# ============================================================
-# Table 2.0.2 (A1): kgCO2 per kg material
+# =============================================================================
 A1_EF_PER_KG = {
     "Water": 0.00045,
     "Cement": 0.91796,
@@ -306,11 +326,8 @@ A1_EF_PER_KG = {
     "ECO WR": 0.00167,
     "Retarder": 0.00167,
 }
-
-# Table 2.0.3 (A2): transport EF (kgCO2/km) and assumed distances (km)
 A2_TRUCK_EF_PER_KM = 0.000102576
 A2_SEA_EF_PER_KM   = 0.00001321
-
 A2_DIST = {
     "Water": {"truck_km": 0, "sea_km": 0},
     "Cement": {"truck_km": 310, "sea_km": 700},
@@ -324,10 +341,9 @@ A2_DIST = {
     "ECO WR": {"truck_km": 1000, "sea_km": 8600},
     "Retarder": {"truck_km": 1000, "sea_km": 8600},
 }
-
 EC_A3_CONST = 6.9  # kgCO2 per m3
 
-def compute_ec_report_aligned(water, binder_split, aggs, admix_tuple):
+def compute_ec_report_aligned(water: float, binder_split: dict, aggs: dict, admix_tuple: tuple) -> dict:
     quantities = {
         "Water": float(water),
         "Cement": float(binder_split.get("Cement", 0.0)),
@@ -343,33 +359,23 @@ def compute_ec_report_aligned(water, binder_split, aggs, admix_tuple):
     quantities["ECO WR"] = float(eco)
     quantities["Retarder"] = float(ret)
 
-    # A1
-    ec_a1 = 0.0
-    for mat, qty in quantities.items():
-        ec_a1 += qty * A1_EF_PER_KG.get(mat, 0.0)
+    ec_a1 = sum(qty * A1_EF_PER_KG.get(mat, 0.0) for mat, qty in quantities.items())
 
-    # A2 (truck + sea)
     ec_a2 = 0.0
     for mat, qty in quantities.items():
         cfg = A2_DIST.get(mat)
         if not cfg:
             continue
-        per_kg_transport = (
-            A2_TRUCK_EF_PER_KM * cfg["truck_km"] +
-            A2_SEA_EF_PER_KM * cfg["sea_km"]
-        )
+        per_kg_transport = (A2_TRUCK_EF_PER_KM * cfg["truck_km"] + A2_SEA_EF_PER_KM * cfg["sea_km"])
         ec_a2 += qty * per_kg_transport
 
-    # A3
     ec_a3 = float(EC_A3_CONST)
+    return {"EC_A1": ec_a1, "EC_A2": ec_a2, "EC_A3": ec_a3, "EC_total": ec_a1 + ec_a2 + ec_a3}
 
-    total = ec_a1 + ec_a2 + ec_a3
-    return {"EC_A1": ec_a1, "EC_A2": ec_a2, "EC_A3": ec_a3, "EC_total": total}
-
-# ============================================================
-# Spreadsheet-identical paste/agg math helpers
-# ============================================================
-def _wb_band_split(wb: float):
+# =============================================================================
+# Spreadsheet-identical paste/agg helpers
+# =============================================================================
+def _wb_band_split(wb: float) -> dict:
     if wb >= 0.58:
         key = 0.58
     elif wb >= 0.50:
@@ -380,18 +386,22 @@ def _wb_band_split(wb: float):
         key = 0.34
     return SHEET_SPLITS[key]
 
-def _paste_volume_liters(water_kg, c_kg, s_kg, fa_kg):
-    return (water_kg / DENSITY["Water"]
-            + c_kg / DENSITY["Cement"]
-            + s_kg / DENSITY["GGBFS"]
-            + fa_kg / DENSITY["Fly Ash"]
-            + SHEET_PASTE_EXTRA_LITERS)
+def _paste_volume_liters(water_kg: float, c_kg: float, s_kg: float, fa_kg: float) -> float:
+    return (
+        water_kg / DENSITY["Water"]
+        + c_kg / DENSITY["Cement"]
+        + s_kg / DENSITY["GGBFS"]
+        + fa_kg / DENSITY["Fly Ash"]
+        + SHEET_PASTE_EXTRA_LITERS
+    )
 
-def _combined_agg_density_kg_per_L(split):
-    return (split["20mm"] * DENSITY["20mm Aggregate"]
-            + split["10mm"] * DENSITY["10mm Aggregate"]
-            + split["Man"]  * DENSITY["Man Sand"]
-            + split["Nat"]  * DENSITY["Natural Sand"])
+def _combined_agg_density_kg_per_L(split: dict) -> float:
+    return (
+        split["20mm"] * DENSITY["20mm Aggregate"]
+        + split["10mm"] * DENSITY["10mm Aggregate"]
+        + split["Man"]  * DENSITY["Man Sand"]
+        + split["Nat"]  * DENSITY["Natural Sand"]
+    )
 
 def _family_uses_flyash(fam_key: str) -> bool:
     fam = BINDER_FAMILIES.get(fam_key.upper(), {})
@@ -405,33 +415,32 @@ def compute_admixtures_from_sheet(binder_total_kg_m3: float, fam_key: str):
     eco_kg   = ADM_DOSE_MASS_PER_100KG[eco_key] * scale
     return plast_kg, eco_kg, ret_kg
 
-# ============================================================
-# Core design function
-# ============================================================
+# =============================================================================
+# Core design function (unchanged logic)
+# =============================================================================
 def design_mix_from_strengths_min(
-    f3_min,
-    f28_min,
-    binder_family_key="S5",
-    use_fixed_water=True,
-    water_fixed=WATER_DEFAULT,
-    use_manual_wb=False,
-    manual_wb_value=0.50,
-    enforce_3d=False
-):
+    f3_min: float,
+    f28_min: float,
+    binder_family_key: str = "S5",
+    use_fixed_water: bool = True,
+    water_fixed: float = WATER_DEFAULT,
+    use_manual_wb: bool = False,
+    manual_wb_value: float = 0.50,
+    enforce_3d: bool = False
+) -> dict:
     fam_key = binder_family_key.upper()
 
-    # 1) w/b from f28 (blended inverse) OR manual override
+    # 1) w/b from 28d, or manual
     if use_manual_wb:
         wb_pred = float(manual_wb_value)
     else:
         wb_pred = float(predict_wb_from_f28_curve(f28_min, fam_key))
 
-    # Optional: enforce 3-day minimum by tightening w/b (only when not manual)
     wb_before_3d = wb_pred
     if (not use_manual_wb) and enforce_3d:
         wb_pred = float(recommend_wb_for_f3(float(f3_min), fam_key, wb_pred))
 
-    # 2) Water (fixed or predicted)
+    # 2) Water
     water_pred = float(get_water(f3_min, f28_min, wb_pred, fam_key, use_fixed_water, water_fixed))
 
     # 3) Binder total + split per family
@@ -441,11 +450,11 @@ def design_mix_from_strengths_min(
     cem_frac = max(0.0, 1.0 - slag_frac - fly_frac)
     c, s, fa = binder_total * cem_frac, binder_total * slag_frac, binder_total * fly_frac
 
-    # 4) Admixtures (sheet-accurate)
+    # 4) Admixtures
     plast, eco, ret = compute_admixtures_from_sheet(binder_total, fam_key)
     adm_total = plast + eco + ret
 
-    # 5) Aggregates from sheet logic
+    # 5) Aggregates (sheet logic)
     split = _wb_band_split(wb_pred)
     V_paste_L = _paste_volume_liters(water_pred, c, s, fa)
     air_pct = float(DEFAULT_AIR_PERCENT)
@@ -461,7 +470,7 @@ def design_mix_from_strengths_min(
 
     rho_target = water_pred + binder_total + adm_total + M_agg_total
 
-    # 6) EC (REPORT-ALIGNED)
+    # 6) EC
     ec_breakdown = compute_ec_report_aligned(
         water_pred,
         {"Cement": c, "GGBFS": s, "Fly Ash": fa},
@@ -492,43 +501,58 @@ def design_mix_from_strengths_min(
         },
         "binder_exact": {"Cement": float(c), "GGBFS": float(s), "Fly Ash": float(fa)},
         "admixture_split_kg_m3": {"Plastiment 30": float(plast), "ECO WR": float(eco), "Retarder": float(ret)},
-        "aggregates_exact": {"20mm Aggregate": float(a20), "10mm Aggregate": float(a10), "Man Sand": float(ms), "Natural Sand": float(ns)},
+        "aggregates_exact": {
+            "20mm Aggregate": float(a20),
+            "10mm Aggregate": float(a10),
+            "Man Sand": float(ms),
+            "Natural Sand": float(ns)
+        },
         "embodied_carbon": ec_breakdown,
         "totals": {"sum_all_components_kg_m3": float(total_mass)}
     }
 
-# ============================================================
-# Sidebar
-# ============================================================
+# =============================================================================
+# Sidebar (professional structure)
+# =============================================================================
 with st.sidebar:
     st.header("Inputs")
 
-    use_fixed_water = st.toggle("Use fixed water (validation mode)", value=True)
-    water_fixed = st.number_input("Water (kg/m³)", 120.0, 240.0, WATER_DEFAULT, 1.0, disabled=not use_fixed_water)
+    use_fixed_water = st.toggle("Use fixed water (validation)", value=True)
+    water_fixed = st.number_input(
+        "Water content (kg/m³)",
+        min_value=120.0,
+        max_value=240.0,
+        value=float(WATER_DEFAULT),
+        step=1.0,
+        disabled=not use_fixed_water
+    )
 
+    st.subheader("Binder family")
     fam_keys = list(BINDER_FAMILIES.keys())
     default_idx = fam_keys.index("S5") if "S5" in fam_keys else 0
-    fam = st.selectbox("Binder family", fam_keys, index=default_idx)
+    fam = st.selectbox("Select binder family", fam_keys, index=default_idx)
 
     st.divider()
+    st.subheader("Strength targets")
 
-    use_manual_wb = st.checkbox("Set w/b manually (ignores strength targets)")
-    enforce_3d = st.checkbox("Enforce 3-day minimum (tighten w/b if needed)", value=False, disabled=use_manual_wb)
+    use_manual_wb = st.checkbox("Manual w/b (ignore targets)")
+    enforce_3d = st.checkbox("Enforce 3-day minimum", value=False, disabled=use_manual_wb)
 
     colA, colB = st.columns(2)
     with colA:
-        f3_min = st.number_input("3-day strength target (MPa)", 5.0, 80.0, 30.0, 0.5, disabled=use_manual_wb)
+        f3_min = st.number_input("3-day (MPa)", 5.0, 80.0, 30.0, 0.5, disabled=use_manual_wb)
     with colB:
-        f28_min = st.number_input("28-day strength target (MPa)", 10.0, 100.0, 50.0, 0.5, disabled=use_manual_wb)
+        f28_min = st.number_input("28-day (MPa)", 10.0, 100.0, 50.0, 0.5, disabled=use_manual_wb)
 
-    wb_manual = st.number_input("Manual w/b ratio", 0.30, 0.80, 0.45, 0.01, disabled=not use_manual_wb)
+    wb_manual = st.number_input("Manual w/b", 0.30, 0.80, 0.45, 0.01, disabled=not use_manual_wb)
 
-    run_btn = st.button("Design mix", type="primary", use_container_width=True)
+    st.divider()
+    run_btn = st.button("Run mix design", type="primary", use_container_width=True)
 
-# ============================================================
-# Binder family mixes panel
-# ============================================================
-def _family_percent_rows():
+# =============================================================================
+# Utility tables for professional output
+# =============================================================================
+def binder_family_table() -> pd.DataFrame:
     rows = []
     for k, v in BINDER_FAMILIES.items():
         slag = 100.0 * v.get("GGBFS", 0.0)
@@ -537,16 +561,9 @@ def _family_percent_rows():
         rows.append((k, cem, slag, fly))
     order = ["P1","F2","F4","S3","S5","S6","T1","T2"]
     rows.sort(key=lambda r: order.index(r[0]) if r[0] in order else 999)
-    return rows
+    return pd.DataFrame(rows, columns=["Family", "Cement (%)", "GGBFS (%)", "Fly Ash (%)"])
 
-with st.expander("Binder family mixes (percent of total binder)", expanded=True):
-    fam_table = pd.DataFrame(_family_percent_rows(), columns=["Family", "Cement %", "GGBFS %", "Fly Ash %"])
-    st.dataframe(fam_table, use_container_width=True, hide_index=True)
-
-# ============================================================
-# Main UI helpers
-# ============================================================
-def material_table(out: dict) -> pd.DataFrame:
+def materials_table(out: dict) -> pd.DataFrame:
     w = out["predicted_parameters"]["water_kg_m3"]
     b = out["binder_exact"]
     a = out["aggregates_exact"]
@@ -555,130 +572,251 @@ def material_table(out: dict) -> pd.DataFrame:
     rows = [
         ("Water", DENSITY["Water"], w),
         ("Cement", DENSITY["Cement"], b["Cement"]),
-        ("Fly Ash", DENSITY["Fly Ash"], b["Fly Ash"]),
         ("GGBFS", DENSITY["GGBFS"], b["GGBFS"]),
-        ("20mm Aggregate", DENSITY["20mm Aggregate"], a["20mm Aggregate"]),
-        ("10mm Aggregate", DENSITY["10mm Aggregate"], a["10mm Aggregate"]),
-        ("Man Sand", DENSITY["Man Sand"], a["Man Sand"]),
-        ("Natural Sand", DENSITY["Natural Sand"], a["Natural Sand"]),
+        ("Fly Ash", DENSITY["Fly Ash"], b["Fly Ash"]),
+        ("20 mm aggregate", DENSITY["20mm Aggregate"], a["20mm Aggregate"]),
+        ("10 mm aggregate", DENSITY["10mm Aggregate"], a["10mm Aggregate"]),
+        ("Manufactured sand", DENSITY["Man Sand"], a["Man Sand"]),
+        ("Natural sand", DENSITY["Natural Sand"], a["Natural Sand"]),
         ("Plastiment 30", DENSITY["Plastiment 30"], adm["Plastiment 30"]),
         ("ECO WR", DENSITY["ECO WR"], adm["ECO WR"]),
         ("Retarder", DENSITY["Retarder"], adm["Retarder"]),
     ]
 
-    df_rows, total_mass, total_vol = [], 0.0, 0.0
+    df_rows = []
+    total_mass = 0.0
+    total_vol_L = 0.0
     for name, dens, mass in rows:
         vol = mass / dens if dens > 0 else 0.0
         df_rows.append([name, dens, mass, vol])
         total_mass += mass
-        total_vol += vol
+        total_vol_L += vol
 
-    # Air row
     air_vol_L = (out["predicted_parameters"]["air_percent"] / 100.0) * 1000.0
-    df_rows.append(["Air", np.nan, 0.0, air_vol_L])
-    total_vol += air_vol_L
+    df_rows.append(["Air (assumed)", np.nan, 0.0, air_vol_L])
+    total_vol_L += air_vol_L
 
-    df_out = pd.DataFrame(df_rows, columns=["Material", "Density (kg/L)", "Mass (kg)", "Volume (L)"])
-    df_out["Mass %"] = 100.0 * df_out["Mass (kg)"] / total_mass
+    df_out = pd.DataFrame(df_rows, columns=["Material", "Density (kg/L)", "Mass (kg/m³)", "Volume (L/m³)"])
+    df_out["Mass share (%)"] = np.where(total_mass > 0, 100.0 * df_out["Mass (kg/m³)"] / total_mass, 0.0)
 
-    # format
+    # Round for presentation
     df_out["Density (kg/L)"] = df_out["Density (kg/L)"].map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
-    df_out["Mass (kg)"] = df_out["Mass (kg)"].map(lambda x: f"{x:.2f}")
-    df_out["Volume (L)"] = df_out["Volume (L)"].map(lambda x: f"{x:.2f}")
-    df_out["Mass %"] = df_out["Mass %"].map(lambda x: f"{x:.2f}")
+    df_out["Mass (kg/m³)"] = df_out["Mass (kg/m³)"].map(lambda x: f"{x:.2f}")
+    df_out["Volume (L/m³)"] = df_out["Volume (L/m³)"].map(lambda x: f"{x:.2f}")
+    df_out["Mass share (%)"] = df_out["Mass share (%)"].map(lambda x: f"{x:.2f}")
 
-    avg_density = total_mass / total_vol if total_vol else 0.0
+    avg_density = (total_mass / total_vol_L) if total_vol_L else 0.0
     df_total = pd.DataFrame(
-        [["Total (avg density)", f"{avg_density:.2f}", f"{total_mass:.2f}", f"{total_vol:.2f}", ""]],
+        [["Total (average density)", f"{avg_density:.2f}", f"{total_mass:.2f}", f"{total_vol_L:.2f}", ""]],
         columns=df_out.columns
     )
     return pd.concat([df_out, df_total], ignore_index=True)
 
-# ============================================================
-# Run
-# ============================================================
+def results_download_payload(out: dict) -> pd.DataFrame:
+    """One-row CSV-friendly summary for record keeping."""
+    pp = out["predicted_parameters"]
+    ec = out["embodied_carbon"]
+    b = out["binder_exact"]
+    a = out["aggregates_exact"]
+    adm = out["admixture_split_kg_m3"]
+
+    row = {
+        "binder_family": out["inputs"]["binder_family"],
+        "f3_min_MPa": out["inputs"]["min_3d_MPa"],
+        "f28_min_MPa": out["inputs"]["min_28d_MPa"],
+        "water_binder_ratio": pp["water_binder_ratio"],
+        "water_kg_m3": pp["water_kg_m3"],
+        "binder_total_kg_m3": pp["binder_total_kg_m3"],
+        "cement_kg_m3": b["Cement"],
+        "ggbfs_kg_m3": b["GGBFS"],
+        "flyash_kg_m3": b["Fly Ash"],
+        "agg_20mm_kg_m3": a["20mm Aggregate"],
+        "agg_10mm_kg_m3": a["10mm Aggregate"],
+        "sand_man_kg_m3": a["Man Sand"],
+        "sand_nat_kg_m3": a["Natural Sand"],
+        "plastiment30_kg_m3": adm["Plastiment 30"],
+        "eco_wr_kg_m3": adm["ECO WR"],
+        "retarder_kg_m3": adm["Retarder"],
+        "air_percent": pp["air_percent"],
+        "fresh_density_target_kg_m3": pp["fresh_density_target_kg_m3"],
+        "EC_A1_kgCO2e_m3": ec["EC_A1"],
+        "EC_A2_kgCO2e_m3": ec["EC_A2"],
+        "EC_A3_kgCO2e_m3": ec["EC_A3"],
+        "EC_total_kgCO2e_m3": ec["EC_total"],
+    }
+    return pd.DataFrame([row])
+
+# =============================================================================
+# Main content
+# =============================================================================
+left, right = st.columns([1.05, 0.95])
+
+with left:
+    st.subheader("Binder families")
+    st.dataframe(binder_family_table(), use_container_width=True, hide_index=True)
+    st.caption("Binder families are defined as mass fractions of total binder.")
+
+with right:
+    st.subheader("How to use")
+    st.markdown(
+        """
+1. Select a binder family.  
+2. Enter minimum 3-day and 28-day strength targets (or use manual w/b).  
+3. Choose fixed-water mode (for validation) or allow water estimation.  
+4. Run mix design to generate quantities and embodied carbon output.
+"""
+    )
+
+st.divider()
+
+# =============================================================================
+# Run + render results
+# =============================================================================
 if run_btn:
+    # Guardrails (professional UX)
+    if (not use_manual_wb) and float(f28_min) < 10:
+        st.warning("28-day target is unusually low. Please confirm the target strength is correct.")
+
     out = design_mix_from_strengths_min(
-        f3_min=f3_min,
-        f28_min=f28_min,
+        f3_min=float(f3_min),
+        f28_min=float(f28_min),
         binder_family_key=fam,
-        use_fixed_water=use_fixed_water,
-        water_fixed=water_fixed if use_fixed_water else WATER_DEFAULT,
-        use_manual_wb=use_manual_wb,
-        manual_wb_value=wb_manual,
-        enforce_3d=enforce_3d,
+        use_fixed_water=bool(use_fixed_water),
+        water_fixed=float(water_fixed) if use_fixed_water else float(WATER_DEFAULT),
+        use_manual_wb=bool(use_manual_wb),
+        manual_wb_value=float(wb_manual),
+        enforce_3d=bool(enforce_3d),
     )
 
     pp = out["predicted_parameters"]
-    wb = pp["water_binder_ratio"]
-    wb_before_3d = pp["water_binder_ratio_before_3d"]
-    water = pp["water_kg_m3"]
-    btot = pp["binder_total_kg_m3"]
-
     ec = out["embodied_carbon"]
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Binder family", out["inputs"]["binder_family"])
-
-    if out["inputs"]["use_manual_wb"]:
-        m2.metric("w/b (manual)", f"{wb:.3f}")
-    else:
-        if out["inputs"]["enforce_3d"] and abs(wb - wb_before_3d) > 1e-6:
-            m2.metric("w/b (28d + 3d enforced)", f"{wb:.3f}", delta=f"{(wb - wb_before_3d):.3f}")
-        else:
-            m2.metric("w/b (curve+data)", f"{wb:.3f}")
-
-    m3.metric("Water (kg/m³)", f"{water:.1f}" + (" (fixed)" if out["inputs"]["use_fixed_water"] else " (predicted)"))
-    m4.metric("Binder total (kg/m³)", f"{btot:.1f}")
+    # ---- Summary cards (clean, neutral) ----
+    st.subheader("Results summary")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sum Concrete (kg/m³)", f"{pp['fresh_density_target_kg_m3']:.1f}")
-    c2.metric("Air (%)", f"{pp['air_percent']:.1f}")
-    c3.metric("EC total (kg CO₂e/m³)", f"{ec['EC_total']:.1f}")
-    c4.metric("A1 / A2 / A3", f"{ec['EC_A1']:.1f} / {ec['EC_A2']:.1f} / {ec['EC_A3']:.1f}")
+    c1.metric("Binder family", out["inputs"]["binder_family"])
+    c2.metric("Water/binder ratio", f"{pp['water_binder_ratio']:.3f}" + (" (manual)" if use_manual_wb else ""))
+    c3.metric("Water content (kg/m³)", f"{pp['water_kg_m3']:.1f}" + (" (fixed)" if use_fixed_water else " (estimated)"))
+    c4.metric("Binder total (kg/m³)", f"{pp['binder_total_kg_m3']:.1f}")
 
-    # 3-day reporting
-    f3_pred_report = predict_f3_from_wb(wb, fam)
-    if out["inputs"]["use_manual_wb"]:
-        st.info(f"Predicted 3-day ≈ **{f3_pred_report:.1f} MPa** at w/b = {wb:.3f} (targets ignored)")
-        f28_pred_report = implied_f28_from_wb(wb, fam)
-        st.success(f"Predicted 28-day ≈ **{f28_pred_report:.1f} MPa** at w/b = {wb:.3f} (targets ignored)")
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Fresh density target (kg/m³)", f"{pp['fresh_density_target_kg_m3']:.1f}")
+    c6.metric("Air (assumed, %)", f"{pp['air_percent']:.1f}")
+    c7.metric("Embodied carbon (kg CO₂e/m³)", f"{ec['EC_total']:.1f}")
+    c8.metric("A1 / A2 / A3 (kg CO₂e/m³)", f"{ec['EC_A1']:.1f} / {ec['EC_A2']:.1f} / {ec['EC_A3']:.1f}")
+
+    # ---- Strength check messaging ----
+    st.subheader("Strength checks")
+    f3_pred_report = predict_f3_from_wb(pp["water_binder_ratio"], fam)
+    if use_manual_wb:
+        f28_pred_report = implied_f28_from_wb(pp["water_binder_ratio"], fam)
+        st.info(
+            f"Manual w/b is enabled. Predicted strengths are indicative: "
+            f"**3-day ≈ {f3_pred_report:.1f} MPa**, **28-day ≈ {f28_pred_report:.1f} MPa**."
+        )
     else:
-        msg = f"Predicted 3-day ≈ **{f3_pred_report:.1f} MPa** at w/b = {wb:.3f} (target: {float(f3_min):.1f} MPa)"
-        if f3_pred_report + 1e-9 < float(f3_min) and not enforce_3d:
-            wb_rec = recommend_wb_for_f3(float(f3_min), fam, wb)
+        msg = (
+            f"Predicted **3-day ≈ {f3_pred_report:.1f} MPa** at w/b = {pp['water_binder_ratio']:.3f} "
+            f"(target: {float(f3_min):.1f} MPa)."
+        )
+        if (f3_pred_report + 1e-9) < float(f3_min) and not enforce_3d:
+            wb_rec = recommend_wb_for_f3(float(f3_min), fam, pp["water_binder_ratio"])
             f3_at = predict_f3_from_wb(wb_rec, fam)
             f28_at = implied_f28_from_wb(wb_rec, fam)
-            msg += f"\n\nSuggestion: tighten to **w/b ≈ {wb_rec:.3f}** (predicts 3d ≈ {f3_at:.1f} MPa, 28d ≈ {f28_at:.1f} MPa)."
+            msg += (
+                f"\n\nSuggested adjustment: reduce w/b to **{wb_rec:.3f}** "
+                f"(predicts 3-day ≈ {f3_at:.1f} MPa, 28-day ≈ {f28_at:.1f} MPa)."
+            )
         st.info(msg)
 
-    st.subheader("Detailed Materials Table")
-    st.dataframe(material_table(out), use_container_width=True, hide_index=True)
+    st.divider()
 
-    st.subheader("Aggregates (kg/m³)")
-    aggs_df = pd.DataFrame({
-        "Aggregate": list(out["aggregates_exact"].keys()),
-        "kg/m³": [f"{v:.2f}" for v in out["aggregates_exact"].values()]
-    })
-    st.dataframe(aggs_df, use_container_width=True, hide_index=True)
+    # ---- Tables ----
+    tab1, tab2, tab3 = st.tabs(["Materials", "Binder & aggregates", "Embodied carbon detail"])
 
-    st.subheader("Binder Split")
-    b = out["binder_exact"]
-    binder_split_df = pd.DataFrame({
-        "Component": ["Cement", "GGBFS", "Fly Ash"],
-        "kg/m³": [b["Cement"], b["GGBFS"], b["Fly Ash"]]
-    })
-    binder_split_df["% of binder"] = 100 * binder_split_df["kg/m³"] / btot
-    binder_split_df["kg/m³"] = binder_split_df["kg/m³"].map(lambda x: f"{x:.2f}")
-    binder_split_df["% of binder"] = binder_split_df["% of binder"].map(lambda x: f"{x:.2f}")
-    st.dataframe(binder_split_df, use_container_width=True, hide_index=True)
+    with tab1:
+        st.write("All quantities are reported per **1 m³** basis (kg/m³ and L/m³).")
+        st.dataframe(materials_table(out), use_container_width=True, hide_index=True)
 
-    with st.expander("Embodied carbon breakdown (report method)", expanded=False):
-        st.write({
-            "EC_A1": float(ec["EC_A1"]),
-            "EC_A2": float(ec["EC_A2"]),
-            "EC_A3": float(ec["EC_A3"]),
-            "EC_total": float(ec["EC_total"]),
-        })
+    with tab2:
+        b = out["binder_exact"]
+        a = out["aggregates_exact"]
+        adm = out["admixture_split_kg_m3"]
+        btot = pp["binder_total_kg_m3"]
+
+        colL, colR = st.columns(2)
+
+        with colL:
+            binder_df = pd.DataFrame({
+                "Component": ["Cement", "GGBFS", "Fly Ash"],
+                "kg/m³": [b["Cement"], b["GGBFS"], b["Fly Ash"]],
+            })
+            binder_df["% of binder"] = 100.0 * binder_df["kg/m³"] / max(1e-9, btot)
+            binder_df["kg/m³"] = binder_df["kg/m³"].map(lambda x: f"{x:.2f}")
+            binder_df["% of binder"] = binder_df["% of binder"].map(lambda x: f"{x:.2f}")
+            st.markdown("**Binder split**")
+            st.dataframe(binder_df, use_container_width=True, hide_index=True)
+
+            adm_df = pd.DataFrame({
+                "Admixture": ["Plastiment 30", "ECO WR", "Retarder"],
+                "kg/m³": [adm["Plastiment 30"], adm["ECO WR"], adm["Retarder"]],
+            })
+            adm_df["kg/m³"] = adm_df["kg/m³"].map(lambda x: f"{x:.3f}")
+            st.markdown("**Admixtures**")
+            st.dataframe(adm_df, use_container_width=True, hide_index=True)
+
+        with colR:
+            aggs_df = pd.DataFrame({
+                "Aggregate": ["20 mm aggregate", "10 mm aggregate", "Manufactured sand", "Natural sand"],
+                "kg/m³": [a["20mm Aggregate"], a["10mm Aggregate"], a["Man Sand"], a["Natural Sand"]],
+            })
+            aggs_df["kg/m³"] = aggs_df["kg/m³"].map(lambda x: f"{x:.2f}")
+            st.markdown("**Aggregates**")
+            st.dataframe(aggs_df, use_container_width=True, hide_index=True)
+
+    with tab3:
+        st.markdown(
+            """
+**Embodied carbon reporting**  
+- A1: raw materials  
+- A2: transport (truck + sea) using fixed distances and EFs  
+- A3: manufacturing (constant per m³)
+"""
+        )
+        ec_detail = pd.DataFrame([{
+            "A1 (kg CO₂e/m³)": ec["EC_A1"],
+            "A2 (kg CO₂e/m³)": ec["EC_A2"],
+            "A3 (kg CO₂e/m³)": ec["EC_A3"],
+            "Total (kg CO₂e/m³)": ec["EC_total"],
+        }]).round(3)
+        st.dataframe(ec_detail, use_container_width=True, hide_index=True)
 
     st.divider()
+
+    # ---- Downloads ----
+    st.subheader("Download")
+    payload = results_download_payload(out)
+    st.download_button(
+        label="Download results (CSV)",
+        data=payload.to_csv(index=False).encode("utf-8"),
+        file_name="mix_design_results.csv",
+        mime="text/csv",
+        use_container_width=False,
+    )
+
+    with st.expander("Export JSON (technical)", expanded=False):
+        st.download_button(
+            label="Download results (JSON)",
+            data=pd.Series(out).to_json(),
+            file_name="mix_design_results.json",
+            mime="application/json",
+        )
+
+# -----------------------------------------------------------------------------
+# Footer
+# -----------------------------------------------------------------------------
+st.caption(
+    "Prototype tool for research and reporting support. "
+    "For procurement and approvals, verify assumptions, inputs, and results against project specifications and standards."
+)
