@@ -83,11 +83,33 @@ def build_df() -> pd.DataFrame:
     }
 
     # ---- Add T3 mixes ----
+    # ---- Add T3 mixes ----
+# Format: (Water, PC, Slag, FlyAsh, f3, f7, f28)
+# Note: NEW_EC.xlsx provides either 3-day OR 7-day early strength per row, not both.
+#       Missing early-age value is set to np.nan.
     T3_MIX_ROWS = [
+        # --- Your original (screenshot) T3 rows ---
         (212.3707, 231.6680, 173.7510, 173.7510, 28.0, 48.0, 70.0),
         (204.5452, 174.3984, 130.7988, 130.7988, 18.9, 31.70, 51.50),
         (195.6861, 130.4574, 97.84306, 97.84306, 9.4, 16.6, 32.5),
+
+        # --- Added from NEW_EC.xlsx (binder = 30%FA 30%SL)DO NOT USE ---
+        # Normal Class_ AS 1379 (7-day early strength)
+        #(190.0, 117.0,  88.0,  88.0,  np.nan, 10.5, 26.0),
+        #(190.0, 125.0,  93.0,  93.0,  np.nan, 14.0, 31.0),
+        #(190.0, 136.0, 102.0, 102.0,  np.nan, 20.0, 38.0),
+        #(190.0, 151.0, 114.0, 114.0,  np.nan, 28.0, 46.0),
+        #(190.0, 172.0, 129.0, 129.0,  np.nan, 36.0, 56.0),
+
+        # Special Class_AS3600 (3-day early strength)
+        #(190.0, 146.0, 109.0, 109.0, 15.0,  np.nan, 43.0),
+
+        # Special Class_AS5100.5 (mixed: some 3-day, some 7-day)
+        #(190.0, 157.0, 118.0, 118.0, 17.5,  np.nan, 49.0),
+        #(190.0, 142.0, 106.0, 106.0,  np.nan, 22.4, 41.0),
+        #(190.0, 172.0, 129.0, 129.0,  np.nan, 34.0, 56.0),
     ]
+
     for w, c, s, fa, f3, f7, f28 in T3_MIX_ROWS:
         binder_total = c + s + fa
         wb = w / binder_total

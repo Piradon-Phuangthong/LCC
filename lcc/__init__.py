@@ -1,4 +1,10 @@
-from .config import *  # optional convenience
-from .dataset import build_df
-from .models import build_models, ModelsBundle
-from .design import design_mix_from_strengths_min
+# lcc/__init__.py
+"""
+LCC package.
+
+Keep this file side-effect free.
+Do NOT import submodules here, otherwise importing any lcc.* module will
+trigger those imports and can cause circular/import-order errors.
+"""
+
+__all__ = []
