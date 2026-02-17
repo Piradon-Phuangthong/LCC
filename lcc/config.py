@@ -47,6 +47,7 @@ BINDER_FAMILIES = {
     "P1": {"GGBFS": 0.00, "Fly Ash": 0.00},  # 100% PC
     "F2": {"GGBFS": 0.00, "Fly Ash": 0.25},  # 25% Fly
     "F4": {"GGBFS": 0.00, "Fly Ash": 0.40},  # 40% Fly
+    "F5": {"GGBFS": 0.00, "Fly Ash": 0.50},  # 50% Fly
     "S3": {"GGBFS": 0.35, "Fly Ash": 0.00},  # 35% Slag
     "S5": {"GGBFS": 0.50, "Fly Ash": 0.00},  # 50% Slag
     "S6": {"GGBFS": 0.65, "Fly Ash": 0.00},  # 65% Slag
@@ -60,7 +61,7 @@ FAMILY_PROTOTYPES = {k: (v["GGBFS"], v["Fly Ash"]) for k, v in BINDER_FAMILIES.i
 ADM_DOSE_MASS_PER_100KG = {
     "Retarder":      0.105,  # All binders
     "Plastiment 30": 0.315,  # All binders (low-range WR)
-    "ECO_WR_FA_OR_TERNARY": 0.214,  # FA & ternary (F2, F4, T1, T2, T3)
+    "ECO_WR_FA_OR_TERNARY": 0.214,  # FA & ternary (F2, F4, F5, T1, T2, T3)
     "ECO_WR_PC_OR_SLAG":    0.535,  # GP (P1) & Slag blends (S3, S5, S6)
 }
 

@@ -8,7 +8,7 @@ from .config import (
     SHEET_METHOD,
     SHEET_SUBTRACT_AIR,
 )
-from .models import ModelsBundle, predict_wb_from_f28_curve, get_water
+from .models import ModelsBundle, predict_wb_from_f28_curve, get_water, predict_wb_from_f3_anchor
 from .aggregates import (
     wb_band_split,
     paste_volume_liters,
@@ -17,6 +17,7 @@ from .aggregates import (
 )
 from .ec import compute_ec_report_aligned
 from .utils import compute_admixtures_from_sheet
+from lcc import models
 
 
 def design_mix_from_strengths_min(
@@ -32,8 +33,21 @@ def design_mix_from_strengths_min(
     # 1) w/b from f28 (blended inverse) OR override
     if wb_override is not None:
         wb_pred = float(wb_override)
-    else:
-        wb_pred = predict_wb_from_f28_curve(models, f28_min, fam_key)
+    else:        
+        # Always compute 28-day anchor (used for 7d & as constraint)
+        wb_from_28 = predict_wb_from_f28_curve(models, f28_min, fam_key)
+
+        if early_age_days == 3:
+            # Anchor to 3-day target
+            wb_from_3 = predict_wb_from_f3_anchor(models, early_min, fam_key)
+
+            # Enforce 28-day minimum (lower w/b governs strength)
+            wb_pred = min(wb_from_3, wb_from_28)
+
+        else:
+            # 7-day and 28-day behaviour remains unchanged
+            wb_pred = wb_from_28
+
 
     # 2) Water (fixed or predicted)
     # Note: if you're in VALIDATION mode, water is fixed anyway.

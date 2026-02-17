@@ -30,14 +30,60 @@ from lcc.models import (
 )
 from lcc.design import design_mix_from_strengths_min
 
+
 # =============================================================================
-# Page configuration (neutral/professional)
+# Page configuration (professional / neutral)
 # =============================================================================
 st.set_page_config(
     page_title="Low-Carbon Concrete Mix Design Tool",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# =============================================================================
+# Styling (lightweight, professional)
+# =============================================================================
+st.markdown(
+    """
+<style>
+/* overall spacing */
+.block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
+
+/* headings */
+h1, h2, h3 { letter-spacing: -0.2px; }
+
+/* sidebar refinements */
+section[data-testid="stSidebar"] .block-container { padding-top: 1.1rem; }
+
+/* cards (metrics + info) */
+div[data-testid="stMetric"] { background: rgba(250,250,250,0.65); border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 16px; padding: 12px 14px; }
+
+/* expander */
+div[data-testid="stExpander"] { border-radius: 14px; overflow: hidden; border: 1px solid rgba(0,0,0,0.06); }
+
+/* dataframe border */
+div[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; border: 1px solid rgba(0,0,0,0.06); }
+
+/* subtle caption */
+.small-muted { color: rgba(0,0,0,0.55); font-size: 0.92rem; }
+
+/* badges */
+.badge {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  border: 1px solid rgba(0,0,0,0.10);
+  background: rgba(0,0,0,0.03);
+}
+.badge-good { background: rgba(0, 200, 83, 0.10); border-color: rgba(0, 200, 83, 0.25); }
+.badge-warn { background: rgba(255, 193, 7, 0.12); border-color: rgba(255, 193, 7, 0.25); }
+.badge-info { background: rgba(33, 150, 243, 0.10); border-color: rgba(33, 150, 243, 0.25); }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
 # =============================================================================
@@ -57,6 +103,10 @@ DENSITY_KG_PER_L = {
     "Retarder": 1.05,
 }
 
+# Stable order (✅ includes F5)
+FAMILY_ORDER = ["P1", "F2", "F4", "F5", "S3", "S5", "S6", "T1", "T2", "T3"]
+
+
 # =============================================================================
 # Cached data/model build (fast reruns)
 # =============================================================================
@@ -73,11 +123,23 @@ def _load_models(df: pd.DataFrame):
 # =============================================================================
 # Header
 # =============================================================================
-st.title("Low-Carbon Concrete Mix Design Tool")
-st.write(
-    "This tool generates indicative concrete mix proportions from minimum strength targets and a selected binder family, "
-    "and reports embodied carbon using the report-aligned A1–A3 method implemented in the LCC codebase."
-)
+left_h, right_h = st.columns([0.72, 0.28], vertical_alignment="center")
+with left_h:
+    st.title("Low-Carbon Concrete Mix Design Tool")
+    st.markdown(
+        "<div class='small-muted'>Generate indicative mix proportions from minimum strength targets and a binder family. "
+        "Embodied carbon is reported using the report-aligned A1–A3 method implemented in the LCC codebase.</div>",
+        unsafe_allow_html=True,
+    )
+
+with right_h:
+    if USE_FIXED_WATER:
+        st.markdown(
+            f"<div class='badge badge-good'>VALIDATION MODE • Water fixed at {float(WATER_FIXED):.0f} kg/m³</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("<div class='badge badge-info'>DESIGN MODE • Water predicted by model</div>", unsafe_allow_html=True)
 
 with st.expander("Method and limitations", expanded=False):
     st.markdown(
@@ -111,32 +173,34 @@ with st.spinner("Loading dataset and models..."):
 with st.sidebar:
     st.header("Inputs")
 
-    # Mode display (aligned with config)
-    if USE_FIXED_WATER:
-        st.success(f"Mode: VALIDATION (Water fixed at {float(WATER_FIXED):.0f} kg/m³)")
-    else:
-        st.info("Mode: DESIGN (Water predicted by model)")
+    st.caption("These inputs map directly to the CLI pipeline (LCC.py).")
 
-    st.divider()
     st.subheader("Binder family")
-
     fam_keys = list(BINDER_FAMILIES.keys())
-    # keep S5 as default like CLI
-    default_idx = fam_keys.index("S5") if "S5" in fam_keys else 0
-    fam = st.selectbox("Select binder family", fam_keys, index=default_idx)
 
-    st.divider()
+    # Sort dropdown using FAMILY_ORDER, but keep any extra keys at end
+    fam_keys_sorted = sorted(
+        fam_keys, key=lambda k: FAMILY_ORDER.index(k) if k in FAMILY_ORDER else 999
+    )
+
+    default_idx = fam_keys_sorted.index("S5") if "S5" in fam_keys_sorted else 0
+    fam = st.selectbox("Select binder family", fam_keys_sorted, index=default_idx)
+
     st.subheader("Strength targets")
-
-    early_age_days = st.radio("Early-age strength age (days)", options=[3, 7], horizontal=True, index=0)
+    early_age_days = st.radio(
+        "Early-age strength age (days)", options=[3, 7], horizontal=True, index=0
+    )
 
     colA, colB = st.columns(2)
     with colA:
+        # Keep your original behaviour but make it sensible:
+        # - 3-day typically lower than 7-day; defaults are just UI convenience.
+        early_default = 25.0 if early_age_days == 3 else 35.0
         early_min = st.number_input(
             f"Minimum {early_age_days}-day strength (MPa)",
             min_value=0.0,
             max_value=120.0,
-            value=40.0 if early_age_days == 3 else 25.0,
+            value=float(early_default),
             step=0.5,
         )
     with colB:
@@ -148,10 +212,10 @@ with st.sidebar:
             step=0.5,
         )
 
-    st.divider()
     st.subheader("Water/binder ratio (optional override)")
-
-    suggested_wb_sidebar = float(predict_wb_from_f28_curve(models, float(f28_min), str(fam).upper()))
+    suggested_wb_sidebar = float(
+        predict_wb_from_f28_curve(models, float(f28_min), str(fam).upper())
+    )
     use_wb_override = st.checkbox("Override w/b", value=False)
 
     wb_override_val: Optional[float] = None
@@ -175,15 +239,14 @@ with st.sidebar:
 # =============================================================================
 def binder_family_table() -> pd.DataFrame:
     rows = []
-    # BINDER_FAMILIES stores fractions (0..1)
     for k, v in BINDER_FAMILIES.items():
         slag = 100.0 * float(v.get("GGBFS", 0.0))
         fly = 100.0 * float(v.get("Fly Ash", 0.0))
         cem = max(0.0, 100.0 - slag - fly)
         rows.append((k, cem, slag, fly))
 
-    order = ["P1", "F2", "F4", "S3", "S5", "S6", "T1", "T2", "T3"]
-    rows.sort(key=lambda r: order.index(r[0]) if r[0] in order else 999)
+    # ✅ Updated: include F5 in order
+    rows.sort(key=lambda r: FAMILY_ORDER.index(r[0]) if r[0] in FAMILY_ORDER else 999)
     df_out = pd.DataFrame(rows, columns=["Family", "Cement (%)", "GGBFS (%)", "Fly Ash (%)"])
     return df_out
 
@@ -220,7 +283,6 @@ def _materials_table_from_out(out: Dict[str, Any]) -> pd.DataFrame:
         total_mass += mass
         total_vol_L += vol
 
-    # air volume (reported only)
     air_pct = float(pp.get("air_percent", 1.9))
     air_vol_L = (air_pct / 100.0) * 1000.0
     df_rows.append(["Air (assumed)", np.nan, 0.0, air_vol_L])
@@ -229,7 +291,6 @@ def _materials_table_from_out(out: Dict[str, Any]) -> pd.DataFrame:
     df_out = pd.DataFrame(df_rows, columns=["Material", "Density (kg/L)", "Mass (kg/m³)", "Volume (L/m³)"])
     df_out["Mass share (%)"] = np.where(total_mass > 0, 100.0 * df_out["Mass (kg/m³)"] / total_mass, 0.0)
 
-    # Format
     def fmt(x, nd=2):
         return "" if pd.isna(x) else f"{x:.{nd}f}"
 
@@ -246,7 +307,7 @@ def _materials_table_from_out(out: Dict[str, Any]) -> pd.DataFrame:
     return pd.concat([df_out, total_row], ignore_index=True)
 
 
-def _summary_payload(out: Dict[str, Any], early_age_days: int) -> pd.DataFrame:
+def _summary_payload(out: Dict[str, Any]) -> pd.DataFrame:
     pp = out["predicted_parameters"]
     ec = out["embodied_carbon"]
     b = out["binder_exact"]
@@ -292,7 +353,7 @@ with left:
     st.caption("Binder families are defined as mass fractions of total binder (as per the LCC configuration).")
 
 with right:
-    st.subheader("How to use")
+    st.subheader("Workflow")
     st.markdown(
         """
 1. Select a binder family.  
@@ -301,9 +362,7 @@ with right:
 4. Run the mix design to view quantities and embodied carbon (A1–A3).
 """
     )
-    st.info(
-        "This UI calls the same functions used by `LCC.py`. Results should match the CLI for the same inputs and configuration."
-    )
+    st.info("The UI calls the same functions used by `LCC.py`. Results should match the CLI for the same inputs.")
 
 st.divider()
 
@@ -313,7 +372,6 @@ st.divider()
 if run_btn:
     fam_key = str(fam).upper()
 
-    # Run design using the package (aligned with CLI)
     out = design_mix_from_strengths_min(
         models=models,
         early_min=float(early_min),
@@ -330,19 +388,18 @@ if run_btn:
     water_used = float(pp["water_kg_m3"])
     binder_total = float(pp["binder_total_kg_m3"])
 
-    # Reporting-only strengths (same as CLI)
+    # Reporting-only strengths
     f3_pred = float(predict_f3_from_wb(models, wb_used, fam_key))
     f7_pred = float(predict_f7_from_wb(models, wb_used, fam_key))
     f28_pred = float(implied_f28_from_wb(models, wb_used, fam_key))
 
-    # Compliance checks (display only)
     early_pred = f7_pred if int(early_age_days) == 7 else f3_pred
     early_ok = (early_pred + 1e-9) >= float(early_min)
     f28_ok = (f28_pred + 1e-9) >= float(f28_min)
 
-    # Summary cards
-    st.subheader("Results summary")
+    st.subheader("Results")
 
+    # Summary cards
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Binder family", out["inputs"]["binder_family"])
     c2.metric("Water/binder ratio", f"{wb_used:.3f}" + (" (override)" if use_wb_override else ""))
@@ -355,13 +412,19 @@ if run_btn:
     c7.metric("Embodied carbon (kg CO₂e/m³)", f"{float(ec['EC_total']):.1f}")
     c8.metric("A1 / A2 / A3", f"{ec['EC_A1']:.1f} / {ec['EC_A2']:.1f} / {ec['EC_A3']:.1f}")
 
+    st.markdown(
+        f"<div class='badge {'badge-good' if (early_ok and f28_ok) else 'badge-warn'}'>"
+        + ("Targets met (reporting-only estimates)." if (early_ok and f28_ok) else "One or more targets not met (reporting-only estimates).")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
     st.divider()
 
     # Strength checks
     st.subheader("Strength checks (reporting only)")
 
     colL, colR = st.columns(2)
-
     with colL:
         st.markdown("**Predicted strengths at selected w/b**")
         st.write(f"- 3-day strength: **{f3_pred:.1f} MPa**")
@@ -383,16 +446,13 @@ if run_btn:
                 msg.append(f"28-day target not met (predicted {f28_pred:.1f} MPa).")
             st.warning(" ".join(msg))
             st.caption(
-                "Tip: If a target is not met, reduce w/b (use the override) and re-run, or review the underlying curve/data "
-                "fit for that binder family."
+                "Tip: Reduce w/b (use override) and re-run, or review the underlying curve/data fit for that binder family."
             )
 
     st.divider()
 
     # Detailed outputs
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["Materials", "Binder & aggregates", "Embodied carbon", "Export"]
-    )
+    tab1, tab2, tab3, tab4 = st.tabs(["Materials", "Binder & aggregates", "Embodied carbon", "Export"])
 
     with tab1:
         st.write("All quantities are reported per **1 m³** basis.")
@@ -472,7 +532,7 @@ if run_btn:
     with tab4:
         st.markdown("**Download outputs**")
 
-        payload = _summary_payload(out, int(early_age_days))
+        payload = _summary_payload(out)
         st.download_button(
             label="Download results (CSV)",
             data=payload.to_csv(index=False).encode("utf-8"),

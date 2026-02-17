@@ -223,7 +223,7 @@ def predict_wb_from_f28_curve(models: ModelsBundle, f28: float, fam_key: str) ->
         w_data = 0.7 if f <= 40 else (0.4 if f >= 60 else 0.7 - (0.3 * (f - 40) / 20.0))
         wb = w_data * wb_knn + (1.0 - w_data) * wb_curve
 
-    # ✅ NEW (one-line safety): ensure curve-implied f28 >= target f28
+    # ensure curve-implied f28 >= target f28
     wb = min(wb, wb_curve)
 
     return max(0.34, min(0.75, wb))
@@ -242,6 +242,34 @@ def predict_f3_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
     s = float(fam.get("GGBFS", 0.0))
     f = float(fam.get("Fly Ash", 0.0))
     return float(models.knn_f3_global.predict([[wb, s, f]])[0])
+
+# -------------------------------------------------------------------------
+# NEW: 3-day anchor inversion (used only when early_age_days == 3)
+# -------------------------------------------------------------------------
+def predict_wb_from_f3_anchor(
+    models: ModelsBundle,
+    f3_target: float,
+    fam_key: str,
+    wb_min: float = 0.34,
+    wb_max: float = 0.75,
+    n_grid: int = 500,
+) -> float:
+    """
+    Invert the f3 model to obtain w/b that matches the 3-day target.
+    Uses bounded 1D grid search over a realistic w/b range.
+    """
+
+    wb_grid = np.linspace(wb_min, wb_max, n_grid)
+
+    # Predict f3 over the grid
+    f3_preds = np.array([
+        predict_f3_from_wb(models, wb, fam_key)
+        for wb in wb_grid
+    ])
+
+    # Find wb that minimizes absolute error to target
+    idx = np.argmin(np.abs(f3_preds - f3_target))
+    return float(wb_grid[idx])
 
 
 def predict_f7_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
