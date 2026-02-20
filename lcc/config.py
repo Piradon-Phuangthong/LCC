@@ -53,7 +53,6 @@ BINDER_FAMILIES = {
     "S6": {"GGBFS": 0.65, "Fly Ash": 0.00},  # 65% Slag
     "T1": {"GGBFS": 0.40, "Fly Ash": 0.20},  # 40% Slag + 20% Fly
     "T2": {"GGBFS": 0.40, "Fly Ash": 0.30},  # 40% Slag + 30% Fly
-    "T3": {"GGBFS": 0.30, "Fly Ash": 0.30},  # 30% Slag + 30% Fly
 }
 FAMILY_PROTOTYPES = {k: (v["GGBFS"], v["Fly Ash"]) for k, v in BINDER_FAMILIES.items()}
 

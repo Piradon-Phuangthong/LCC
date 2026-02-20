@@ -4,33 +4,31 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import BINDER_FAMILIES, FAMILY_PROTOTYPES
+from .config import FAMILY_PROTOTYPES
+
 
 def _closest_family(slag_frac: float, fly_frac: float) -> str:
     best_key, best_dist = None, 1e9
     for k, (s, f) in FAMILY_PROTOTYPES.items():
-        d = (slag_frac - s)**2 + (fly_frac - f)**2
+        d = (slag_frac - s) ** 2 + (fly_frac - f) ** 2
         if d < best_dist:
             best_key, best_dist = k, d
     assert best_key is not None
     return best_key
 
+
 def build_df() -> pd.DataFrame:
     """
-    Build the dataset dataframe exactly like your current script:
-    - base rows
-    - append T3 rows
-    - add EC_exp (padded with NaN)
-    - compute slag/fly fractions and nearest family label
+    Build dataframe from Tran's 45 mixes (Table 4.2.1).
+    Changes:
+    - T3 mixes removed
+    - Hardcoded experimental EC list removed (we calculate EC in-code)
+    - Water/Binder is re-computed from (Free Water) / (Cement+GGBFS+Fly Ash) for consistency
+    - Compute slag/fly fractions and nearest family label
     """
-    data2 = {
-        "Water/Binder": [
-            0.57, 0.57, 0.57, 0.58, 0.57, 0.57, 0.57, 0.55, 0.54,
-            0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.44, 0.47,
-            0.42, 0.41, 0.42, 0.42, 0.42, 0.42, 0.41, 0.40, 0.39,
-            0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34,
-            0.66, 0.66, 0.64, 0.66, 0.66, 0.66, 0.66, 0.66, 0.66
-        ],
+
+    # ---- Tran dataset: 45 mixes (P1/F2/F4/F5/S3/S5/S6/T1/T2 across A–E) ----
+    data = {
         "Free Water": [
             191, 192, 193, 197, 191, 190, 191, 182, 180,
             189, 192, 191, 196, 191, 191, 191, 173, 184,
@@ -82,60 +80,19 @@ def build_df() -> pd.DataFrame:
         ],
     }
 
-    # ---- Add T3 mixes ----
-    # ---- Add T3 mixes ----
-# Format: (Water, PC, Slag, FlyAsh, f3, f7, f28)
-# Note: NEW_EC.xlsx provides either 3-day OR 7-day early strength per row, not both.
-#       Missing early-age value is set to np.nan.
-    T3_MIX_ROWS = [
-        # --- Your original (screenshot) T3 rows ---
-        (212.3707, 231.6680, 173.7510, 173.7510, 28.0, 48.0, 70.0),
-        (204.5452, 174.3984, 130.7988, 130.7988, 18.9, 31.70, 51.50),
-        (195.6861, 130.4574, 97.84306, 97.84306, 9.4, 16.6, 32.5),
+    df = pd.DataFrame(data)
 
-        # --- Added from NEW_EC.xlsx (binder = 30%FA 30%SL)DO NOT USE ---
-        # Normal Class_ AS 1379 (7-day early strength)
-        #(190.0, 117.0,  88.0,  88.0,  np.nan, 10.5, 26.0),
-        #(190.0, 125.0,  93.0,  93.0,  np.nan, 14.0, 31.0),
-        #(190.0, 136.0, 102.0, 102.0,  np.nan, 20.0, 38.0),
-        #(190.0, 151.0, 114.0, 114.0,  np.nan, 28.0, 46.0),
-        #(190.0, 172.0, 129.0, 129.0,  np.nan, 36.0, 56.0),
-
-        # Special Class_AS3600 (3-day early strength)
-        #(190.0, 146.0, 109.0, 109.0, 15.0,  np.nan, 43.0),
-
-        # Special Class_AS5100.5 (mixed: some 3-day, some 7-day)
-        #(190.0, 157.0, 118.0, 118.0, 17.5,  np.nan, 49.0),
-        #(190.0, 142.0, 106.0, 106.0,  np.nan, 22.4, 41.0),
-        #(190.0, 172.0, 129.0, 129.0,  np.nan, 34.0, 56.0),
-    ]
-
-    for w, c, s, fa, f3, f7, f28 in T3_MIX_ROWS:
-        binder_total = c + s + fa
-        wb = w / binder_total
-        data2["Water/Binder"].append(float(wb))
-        data2["Free Water"].append(float(w))
-        data2["Cement"].append(float(c))
-        data2["GGBFS"].append(float(s))
-        data2["Fly Ash"].append(float(fa))
-        data2["Strength3d"].append(float(f3))
-        data2["Strength7d"].append(float(f7))
-        data2["Strength28d"].append(float(f28))
-
-    ec_list = [
-        358, 280, 235, 206, 275, 233, 199, 197, 168,
-        403, 318, 268, 233, 310, 269, 222, 226, 190,
-        470, 366, 307, 267, 366, 306, 258, 261, 218,
-        581, 453, 375, 327, 431, 373, 306, 306, 255,
-        299, 227, 188, 163, 223, 192, 159, 155, 129
-    ]
-
-    df = pd.DataFrame(data2)
-    df["EC_exp"] = ec_list + [np.nan] * (len(df) - len(ec_list))
-
+    # Compute Water/Binder consistently from the component masses
     binder_sum = (df["Cement"] + df["GGBFS"] + df["Fly Ash"]).replace(0, 1e-9)
+    df["Water/Binder"] = df["Free Water"] / binder_sum
+
+    # Remove experimental EC list; keep column for compatibility (optional)
+    # If nothing downstream ever references EC_exp, you can delete this line.
+    df["EC_exp"] = np.nan
+
+    # Family labelling
     df["_slag_frac"] = df["GGBFS"] / binder_sum
-    df["_fly_frac"]  = df["Fly Ash"] / binder_sum
+    df["_fly_frac"] = df["Fly Ash"] / binder_sum
     df["_family"] = [_closest_family(s, f) for s, f in zip(df["_slag_frac"], df["_fly_frac"])]
 
     return df

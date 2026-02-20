@@ -14,8 +14,8 @@ def _family_percent_rows():
         cem  = max(0.0, 100.0 - slag - fly)
         rows.append((k, cem, slag, fly))
 
-    # ✅ Updated: include F5 in the menu order (keeps your exact format)
-    order = ["P1", "F2", "F4", "F5", "S3", "S5", "S6", "T1", "T2", "T3"]
+    # ✅ T3 removed from menu order
+    order = ["P1", "F2", "F4", "F5", "S3", "S5", "S6", "T1", "T2"]
     rows.sort(key=lambda r: order.index(r[0]) if r[0] in order else 999)
     return rows
 
@@ -24,7 +24,7 @@ def show_binder_family_options():
     print("\n=== Binder Family Options (percent of total binder) ===")
     print(f"{'#':<2} {'Family':<6} {'Cement %':>9} {'GGBFS %':>9} {'Fly Ash %':>10}  Example")
 
-    # ✅ Updated: include F5
+    # ✅ T3 removed from examples
     example = {
         "P1": "100% PC",
         "F2": "25% Fly Ash",
@@ -35,7 +35,6 @@ def show_binder_family_options():
         "S6": "65% Slag",
         "T1": "40% Slag + 20% Fly",
         "T2": "40% Slag + 30% Fly",
-        "T3": "30% Slag + 30% Fly",
     }
 
     rows = _family_percent_rows()
@@ -78,7 +77,6 @@ def choose_early_age_and_min_strength() -> Tuple[int, float]:
 
 
 def print_binder_split_display(binder_exact, binder_total, step=1.0):
-    # ✅ Small safety: .get() fallback so it won’t crash if a component is missing
     c = float(binder_exact.get("Cement", 0.0))
     s = float(binder_exact.get("GGBFS", 0.0))
     fa = float(binder_exact.get("Fly Ash", 0.0))
@@ -93,7 +91,6 @@ def print_binder_split_display(binder_exact, binder_total, step=1.0):
     ]
     shown = [(n, round(m, 1), snap(p, step)) for (n, m, p) in rows]
 
-    # Keep your exact "snap then fix residual to 100%" logic
     residual = round(100.0 - sum(p for _, _, p in shown), 10)
     imax = max(range(len(rows)), key=lambda i: rows[i][2])
     n, m, p = shown[imax]
@@ -114,7 +111,6 @@ def render_detailed_table(out, densities=DENSITY):
     a = out["aggregates_exact"]
     adm = out["admixture_split_kg_m3"]
 
-    # ✅ Keep exact format, but make it robust if any admixture is missing
     rows = [
         ("Water", densities["Water"], w),
         ("Cement", densities["Cement"], b.get("Cement", 0.0)),
