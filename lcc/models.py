@@ -220,6 +220,8 @@ def predict_wb_from_f28_curve(models: ModelsBundle, f28: float, fam_key: str) ->
         wb = wb_curve
     else:
         f = float(f28)
+
+        
         w_data = 0.7 if f <= 40 else (0.4 if f >= 60 else 0.7 - (0.3 * (f - 40) / 20.0))
         wb = w_data * wb_knn + (1.0 - w_data) * wb_curve
 
@@ -282,6 +284,39 @@ def predict_f7_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
     return float(models.knn_f7_global.predict([[wb, s, f]])[0])
 
 
+
+def predict_f14_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
+    """
+    Predict 14-day strength using the existing 7-day and 28-day predictors.
+
+    We do NOT have a dedicated 14-day model in the dataset, so we estimate
+    strength development between 7 and 28 days with a simple power law:
+
+        f(t) = f28 * (t/28)^n
+
+    where n is derived from the predicted ratio f7/f28.
+    """
+    f28 = float(implied_f28_from_wb(models, wb, fam_key))
+    f7 = float(predict_f7_from_wb(models, wb, fam_key))
+
+    if f28 <= 0.0:
+        return 0.0
+
+    # Clamp ratio to avoid exploding exponents from model noise
+    r = f7 / f28
+    r = max(0.01, min(0.999, float(r)))
+
+    denom = np.log(7.0 / 28.0)
+    n = float(np.log(r) / denom) if denom != 0.0 else 1.0
+
+    f14 = float(f28 * ((14.0 / 28.0) ** n))
+
+    # Keep monotonic between 7d and 28d
+    lo = min(f7, f28)
+    hi = max(f7, f28)
+    return max(lo, min(hi, f14))
+
+
 def get_water(
     models: ModelsBundle,
     early_strength: float,
@@ -293,7 +328,7 @@ def get_water(
     if USE_FIXED_WATER:
         return float(WATER_FIXED)
 
-    if int(early_age_days) == 7:
+    if int(early_age_days) in (7, 14):
         mdl_w = models.family_models_water_7d.get(fam_key, models.knn_water_global_7d)
         w = float(mdl_w.predict([[float(early_strength), float(f28), float(wb)]])[0])
     else:

@@ -8,7 +8,11 @@ from .config import (
     SHEET_METHOD,
     SHEET_SUBTRACT_AIR,
 )
-from .models import ModelsBundle, predict_wb_from_f28_curve, get_water, predict_wb_from_f3_anchor
+from .models import (
+    ModelsBundle,
+    predict_wb_from_f28_curve,
+    get_water,
+)
 from .aggregates import (
     wb_band_split,
     paste_volume_liters,
@@ -17,7 +21,24 @@ from .aggregates import (
 )
 from .ec import compute_ec_report_aligned
 from .utils import compute_admixtures_from_sheet
-from lcc import models
+
+
+# Only apply these limits when early_age_days == 3
+# (Values taken from your benchmark tables / manual sheet style)
+WB_MAX_BY_FAMILY_3D: Dict[str, float] = {
+    "P1": 0.75,  # GP
+    "F2": 0.70,  # 25% FA
+    "F4": 0.64,  # 40% FA
+    "F5": 0.58,  # 50% FA
+    "S3": 0.62,  # 35% SL
+    "S5": 0.55,  # 50% SL
+    "S6": 0.48,  # 65% SL
+    "T1": 0.52,  # 20% FA + 40% SL
+    "T2": 0.49,  # 30% FA + 40% SL
+}
+
+WB_MIN_GLOBAL = 0.34
+WB_MAX_GLOBAL = 0.75
 
 
 def design_mix_from_strengths_min(
@@ -26,32 +47,33 @@ def design_mix_from_strengths_min(
     f28_min: float,
     binder_family_key: str = "S5",
     early_age_days: int = 3,
-    wb_override: Optional[float] = None,  # <<< NEW
+    wb_override: Optional[float] = None,
 ) -> Dict[str, Any]:
     fam_key = binder_family_key.upper()
 
-    # 1) w/b from f28 (blended inverse) OR override
+    # ---------------------------------------------------------------------
+    # 1) Choose w/b (unchanged base behaviour)
+    # ---------------------------------------------------------------------
     if wb_override is not None:
         wb_pred = float(wb_override)
-    else:        
-        # Always compute 28-day anchor (used for 7d & as constraint)
-        wb_from_28 = predict_wb_from_f28_curve(models, f28_min, fam_key)
+    else:
+        wb_pred = float(predict_wb_from_f28_curve(models, f28_min, fam_key))
 
-        if early_age_days == 3:
-            # Anchor to 3-day target
-            wb_from_3 = predict_wb_from_f3_anchor(models, early_min, fam_key)
+    # ---------------------------------------------------------------------
+    # 1b) Apply limits ONLY for 3-day mode
+    #     (7-day and 14-day are left exactly as-is)
+    # ---------------------------------------------------------------------
+    if int(early_age_days) == 3:
+        wb_cap = WB_MAX_BY_FAMILY_3D.get(fam_key)
+        if wb_cap is not None:
+            wb_pred = min(wb_pred, float(wb_cap))
 
-            # Enforce 28-day minimum (lower w/b governs strength)
-            wb_pred = min(wb_from_3, wb_from_28)
+    # Always keep global sanity bounds
+    wb_pred = max(WB_MIN_GLOBAL, min(WB_MAX_GLOBAL, float(wb_pred)))
 
-        else:
-            # 7-day and 28-day behaviour remains unchanged
-            wb_pred = wb_from_28
-
-
-    # 2) Water (fixed or predicted)
-    # Note: if you're in VALIDATION mode, water is fixed anyway.
-    # If you're in DESIGN mode, water model uses (early_strength, f28, wb).
+    # ---------------------------------------------------------------------
+    # 2) Water (fixed or predicted) - unchanged
+    # ---------------------------------------------------------------------
     water_pred = get_water(
         models,
         early_min,
@@ -61,18 +83,24 @@ def design_mix_from_strengths_min(
         early_age_days=int(early_age_days),
     )
 
-    # 3) Binder total + split per chosen family
+    # ---------------------------------------------------------------------
+    # 3) Binder total + split per chosen family - unchanged
+    # ---------------------------------------------------------------------
     binder_total = water_pred / wb_pred
     fam = BINDER_FAMILIES[fam_key]
     slag_frac, fly_frac = fam.get("GGBFS", 0.0), fam.get("Fly Ash", 0.0)
     cem_frac = max(0.0, 1.0 - slag_frac - fly_frac)
     c, s, fa = binder_total * cem_frac, binder_total * slag_frac, binder_total * fly_frac
 
-    # 4) Admixtures — per 100 kg binder (sheet-accurate)
+    # ---------------------------------------------------------------------
+    # 4) Admixtures (sheet-accurate) - unchanged
+    # ---------------------------------------------------------------------
     plast, eco, ret = compute_admixtures_from_sheet(binder_total, fam_key)
     adm_total = plast + eco + ret
 
-    # 5) Aggregates from sheet logic (or fallback to template scaling)
+    # ---------------------------------------------------------------------
+    # 5) Aggregates - IMPORTANT: use split["Man"] and split["Nat"]
+    # ---------------------------------------------------------------------
     if SHEET_METHOD:
         split = wb_band_split(wb_pred)
         V_paste_L = paste_volume_liters(water_pred, c, s, fa)
@@ -89,8 +117,8 @@ def design_mix_from_strengths_min(
         M_agg_total = V_agg_L * rho_agg_kg_per_L
         a20 = M_agg_total * split["20mm"]
         a10 = M_agg_total * split["10mm"]
-        ms = M_agg_total * split["Man"]
-        ns = M_agg_total * split["Nat"]
+        ms  = M_agg_total * split["Man"]
+        ns  = M_agg_total * split["Nat"]
 
         rho_target = water_pred + binder_total + adm_total + M_agg_total
         center_wb = wb_pred
@@ -110,7 +138,9 @@ def design_mix_from_strengths_min(
     }
     binder_dict = {"Cement": c, "GGBFS": s, "Fly Ash": fa}
 
-    # 6) EC (REPORT-ALIGNED)
+    # ---------------------------------------------------------------------
+    # 6) EC (REPORT-ALIGNED) - unchanged
+    # ---------------------------------------------------------------------
     ec_breakdown = compute_ec_report_aligned(water_pred, binder_dict, aggs_dict, (plast, eco, ret))
     total_mass = water_pred + binder_total + (a20 + a10 + ms + ns) + adm_total
 
@@ -120,7 +150,7 @@ def design_mix_from_strengths_min(
             "early_age_days": int(early_age_days),
             "min_28d_MPa": float(f28_min),
             "binder_family": fam_key,
-            "wb_override": None if wb_override is None else float(wb_override),  # <<< optional tracking
+            "wb_override": None if wb_override is None else float(wb_override),
         },
         "predicted_parameters": {
             "water_binder_ratio": float(wb_pred),

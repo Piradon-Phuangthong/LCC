@@ -67,11 +67,11 @@ def ask_float(prompt, default=None):
 
 
 def choose_early_age_and_min_strength() -> Tuple[int, float]:
-    s = input("\nEarly-age strength age? (3 or 7) [3]: ").strip()
+    s = input("\nEarly-age strength age? (3, 7, or 14) [3]: ").strip()
     age = 3 if not s else int(float(s))
-    if age not in (3, 7):
-        raise ValueError("Please enter 3 or 7.")
-    default_strength = 30.0 if age == 3 else 40.0
+    if age not in (3, 7, 14):
+        raise ValueError("Please enter 3, 7, or 14.")
+    default_strength = 30.0 if age == 3 else (40.0 if age == 7 else 45.0)
     early_min = ask_float(f"Minimum {age}-day strength (MPa)", default_strength)
     return age, float(early_min)
 

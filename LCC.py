@@ -7,6 +7,7 @@ from lcc.models import (
     build_models,
     predict_f3_from_wb,
     predict_f7_from_wb,
+    predict_f14_from_wb,
     implied_f28_from_wb,
     predict_wb_from_f28_curve,
 )
@@ -67,7 +68,7 @@ def main():
     while True:
         print(
             f"\n=== Strength-Driven Mix Designer — {mode}; "
-            f"Curve-based w/b; early-age input can be 3d or 7d; "
+            f"Curve-based w/b; early-age input can be 3d, 7d, or 14d; "
             f"REPORT-aligned EC (A1+A2+A3) ==="
         )
 
@@ -115,11 +116,13 @@ def main():
         # Reporting only
         f3_pred = predict_f3_from_wb(models, wb, fam)
         f7_pred = predict_f7_from_wb(models, wb, fam)
+        f14_pred = predict_f14_from_wb(models, wb, fam)
         f28_pred = implied_f28_from_wb(models, wb, fam)
 
         print("\nPredicted strengths (reporting only):")
         print(f"  f3  ≈ {f3_pred:.1f} MPa")
         print(f"  f7  ≈ {f7_pred:.1f} MPa")
+        print(f"  f14 ≈ {f14_pred:.1f} MPa")
         print(f"  f28 ≈ {f28_pred:.1f} MPa")
 
         print_binder_split_display(out["binder_exact"], btot, step=1.0)
