@@ -81,6 +81,22 @@ DISPLAY_ORDER = [
     ("totals.sum_all_components_kg_m3", "Total mass of all components (kg/m³)"),
 ]
 
+# Added: family table with mix + binder percentages
+FAMILY_DETAILS = [
+    {"Family": "P1", "Mix": "GP",              "Cement (%)": 100, "GGBFS (%)": 0,  "Fly Ash (%)": 0},
+    {"Family": "F2", "Mix": "25% FA",          "Cement (%)": 75,  "GGBFS (%)": 0,  "Fly Ash (%)": 25},
+    {"Family": "F4", "Mix": "40% FA",          "Cement (%)": 60,  "GGBFS (%)": 0,  "Fly Ash (%)": 40},
+    {"Family": "F5", "Mix": "50% FA",          "Cement (%)": 50,  "GGBFS (%)": 0,  "Fly Ash (%)": 50},
+    {"Family": "S3", "Mix": "35% SL",          "Cement (%)": 65,  "GGBFS (%)": 35, "Fly Ash (%)": 0},
+    {"Family": "S5", "Mix": "50% SL",          "Cement (%)": 50,  "GGBFS (%)": 50, "Fly Ash (%)": 0},
+    {"Family": "S6", "Mix": "65% SL",          "Cement (%)": 35,  "GGBFS (%)": 65, "Fly Ash (%)": 0},
+    {"Family": "T1", "Mix": "20% FA + 40% SL", "Cement (%)": 40,  "GGBFS (%)": 40, "Fly Ash (%)": 20},
+    {"Family": "T2", "Mix": "30% FA + 40% SL", "Cement (%)": 30,  "GGBFS (%)": 40, "Fly Ash (%)": 30},
+]
+
+family_table_df = pd.DataFrame(FAMILY_DETAILS)
+family_lookup = {row["Family"]: row for row in FAMILY_DETAILS}
+
 
 def safe_float(value):
     try:
@@ -130,6 +146,12 @@ def format_mix_output(result_dict):
 
     return pd.DataFrame(rows)
 
+
+# Added: family/mix/binder percentage table
+st.subheader("Concrete Families")
+st.dataframe(family_table_df, use_container_width=True, hide_index=True)
+
+st.divider()
 
 st.sidebar.header("Design Inputs")
 
@@ -213,6 +235,16 @@ if run_design:
             c5.metric("28-day requirement", f"≥ {f28_min:.1f} MPa")
             c6.metric("Early-age requirement", f"≥ {early_strength:.1f} MPa")
             c7.metric("Embodied carbon", f"{ec_total:.1f} kgCO₂-e/m³")
+
+            selected_family = family_lookup.get(family)
+            if selected_family:
+                st.info(
+                    f"Selected family: **{selected_family['Family']}** | "
+                    f"Mix: **{selected_family['Mix']}** | "
+                    f"Cement: **{selected_family['Cement (%)']}%** | "
+                    f"GGBFS: **{selected_family['GGBFS (%)']}%** | "
+                    f"Fly Ash: **{selected_family['Fly Ash (%)']}%**"
+                )
 
             st.success(
                 f"Mix design generated for {family} with a {early_age_days}-day minimum strength requirement."
