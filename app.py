@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import altair as alt
 
 from lcc.dataset import build_df
 from lcc.models import (
@@ -8,9 +10,11 @@ from lcc.models import (
     predict_f7_from_wb,
     predict_f14_from_wb,
     implied_f28_from_wb,
-    predict_wb_from_f28_curve,
 )
 from lcc.design import design_mix_from_strengths_min
+
+
+STRENGTH_MATCH_TOL_MPA = 0.1
 
 
 st.set_page_config(
@@ -23,36 +27,33 @@ st.title("Low-Carbon Concrete Mix Design Tool")
 st.caption("For research and preliminary mix-design estimation only.")
 
 st.markdown(
-    """
+"""
 ### How to use this tool
+
 1. Select the **concrete family**
 2. Choose the **required early-age strength age**
-3. Enter the **minimum required early-age strength**
-4. Enter the **minimum required 28-day strength**
+3. Enter the **minimum early-age strength**
+4. Enter the **minimum 28-day strength**
 5. Click **Generate Mix Design**
-
-The tool will estimate:
-- water–binder ratio
-- 3-day, 7-day, 14-day, and 28-day strengths
-- mix quantities
-- embodied carbon (A1 + A2 + A3)
 """
 )
 
-st.divider()
+# ---------------------------------------------------------
+# Build dataset and models
+# ---------------------------------------------------------
 
-
-@st.cache_resource
+@st.cache_data
 def load_models():
     df = build_df()
     models = build_models(df)
-    return df, models
+    return models
+
+models = load_models()
 
 
-df, models = load_models()
-
-FAMILY_OPTIONS = ["P1", "F2", "F4", "F5", "S3", "S5", "S6", "T1", "T2"]
-AGE_MAP = {"3 Day": 3, "7 Day": 7, "14 Day": 14}
+# ---------------------------------------------------------
+# Helpers for nice mix design output
+# ---------------------------------------------------------
 
 DISPLAY_ORDER = [
     ("inputs.min_early_MPa", "Minimum early-age strength (MPa)"),
@@ -80,22 +81,6 @@ DISPLAY_ORDER = [
     ("embodied_carbon.EC_total", "Embodied carbon total (kgCO₂-e/m³)"),
     ("totals.sum_all_components_kg_m3", "Total mass of all components (kg/m³)"),
 ]
-
-# Added: family table with mix + binder percentages
-FAMILY_DETAILS = [
-    {"Family": "P1", "Mix": "GP",              "Cement (%)": 100, "GGBFS (%)": 0,  "Fly Ash (%)": 0},
-    {"Family": "F2", "Mix": "25% FA",          "Cement (%)": 75,  "GGBFS (%)": 0,  "Fly Ash (%)": 25},
-    {"Family": "F4", "Mix": "40% FA",          "Cement (%)": 60,  "GGBFS (%)": 0,  "Fly Ash (%)": 40},
-    {"Family": "F5", "Mix": "50% FA",          "Cement (%)": 50,  "GGBFS (%)": 0,  "Fly Ash (%)": 50},
-    {"Family": "S3", "Mix": "35% SL",          "Cement (%)": 65,  "GGBFS (%)": 35, "Fly Ash (%)": 0},
-    {"Family": "S5", "Mix": "50% SL",          "Cement (%)": 50,  "GGBFS (%)": 50, "Fly Ash (%)": 0},
-    {"Family": "S6", "Mix": "65% SL",          "Cement (%)": 35,  "GGBFS (%)": 65, "Fly Ash (%)": 0},
-    {"Family": "T1", "Mix": "20% FA + 40% SL", "Cement (%)": 40,  "GGBFS (%)": 40, "Fly Ash (%)": 20},
-    {"Family": "T2", "Mix": "30% FA + 40% SL", "Cement (%)": 30,  "GGBFS (%)": 40, "Fly Ash (%)": 30},
-]
-
-family_table_df = pd.DataFrame(FAMILY_DETAILS)
-family_lookup = {row["Family"]: row for row in FAMILY_DETAILS}
 
 
 def safe_float(value):
@@ -147,165 +132,521 @@ def format_mix_output(result_dict):
     return pd.DataFrame(rows)
 
 
-# Added: family/mix/binder percentage table
-st.subheader("Concrete Families")
-st.dataframe(family_table_df, use_container_width=True, hide_index=True)
+# ---------------------------------------------------------
+# Feasibility helpers
+# ---------------------------------------------------------
 
-st.divider()
+def get_allowed_wb_bounds(family_key, early_age_days):
+    wb_min = 0.34
+    wb_max = 0.75
 
-st.sidebar.header("Design Inputs")
+    if int(early_age_days) == 3:
+        wb_caps_3d = {
+            "P1": 0.75,
+            "F2": 0.70,
+            "F4": 0.64,
+            "F5": 0.58,
+            "S3": 0.62,
+            "S5": 0.55,
+            "S6": 0.48,
+            "T1": 0.52,
+            "T2": 0.49,
+        }
+        wb_max = min(wb_max, wb_caps_3d.get(family_key, wb_max))
 
-family = st.sidebar.selectbox("Concrete family", FAMILY_OPTIONS, index=0)
-age_option = st.sidebar.selectbox(
-    "Required early-age strength",
-    list(AGE_MAP.keys()),
-    index=1,
-)
-early_strength = st.sidebar.number_input(
-    "Minimum required early-age strength (MPa)",
-    min_value=1.0,
-    max_value=100.0,
-    value=30.0,
-    step=1.0,
-)
-f28_min = st.sidebar.number_input(
-    "Minimum required 28-day strength (MPa)",
-    min_value=1.0,
-    max_value=120.0,
-    value=50.0,
-    step=1.0,
-)
-
-with st.sidebar.expander("Optional settings"):
-    use_wb_override = st.checkbox("Override water–binder ratio")
-    wb_suggested = predict_wb_from_f28_curve(models, float(f28_min), family)
-    wb_override = None
-    if use_wb_override:
-        wb_override = st.number_input(
-            "Water–binder ratio override",
-            min_value=0.20,
-            max_value=1.20,
-            value=float(round(wb_suggested, 3)),
-            step=0.01,
-            format="%.3f",
-        )
-    st.caption(f"Suggested w/b from 28-day model: {wb_suggested:.3f}")
-
-run_design = st.sidebar.button("Generate Mix Design", type="primary")
+    return float(wb_min), float(wb_max)
 
 
-if run_design:
-    try:
-        early_age_days = AGE_MAP[age_option]
+def get_strength_at_age(models, family_key, age_days, wb):
+    if int(age_days) == 3:
+        return float(predict_f3_from_wb(models, wb, family_key))
+    elif int(age_days) == 7:
+        return float(predict_f7_from_wb(models, wb, family_key))
+    elif int(age_days) == 14:
+        return float(predict_f14_from_wb(models, wb, family_key))
+    else:
+        return float(implied_f28_from_wb(models, wb, family_key))
 
-        result = design_mix_from_strengths_min(
-            models=models,
-            early_min=float(early_strength),
-            f28_min=float(f28_min),
-            binder_family_key=family,
-            early_age_days=int(early_age_days),
-            wb_override=None if wb_override is None else float(wb_override),
-        )
 
-        pp = result["predicted_parameters"]
-        wb = float(pp["water_binder_ratio"])
-        binder_total = float(pp["binder_total_kg_m3"])
-        water = float(pp["water_kg_m3"])
-        ec_total = float(result["embodied_carbon"]["EC_total"])
+def get_strength_range_for_family(models, family_key, age_days, wb_min, wb_max):
+    f_at_min_wb = get_strength_at_age(models, family_key, age_days, wb_min)
+    f_at_max_wb = get_strength_at_age(models, family_key, age_days, wb_max)
+    return (
+        min(f_at_min_wb, f_at_max_wb),
+        max(f_at_min_wb, f_at_max_wb),
+    )
 
-        pred_f3 = float(predict_f3_from_wb(models, wb, family))
-        pred_f7 = float(predict_f7_from_wb(models, wb, family))
-        pred_f14 = float(predict_f14_from_wb(models, wb, family))
-        pred_f28 = float(implied_f28_from_wb(models, wb, family))
 
-        result_df = format_mix_output(result)
+# ---------------------------------------------------------
+# Graph helpers
+# ---------------------------------------------------------
 
-        tab1, tab2, tab3 = st.tabs(["Summary", "Mix Design", "Strengths"])
+def build_strength_curve_df(models, families, age_days):
+    wb_values = np.linspace(0.34, 0.75, 120)
+    rows = []
 
-        with tab1:
-            st.subheader("Design Summary")
+    for fam in families:
+        for wb in wb_values:
+            if age_days == 3:
+                strength = predict_f3_from_wb(models, wb, fam)
+            elif age_days == 7:
+                strength = predict_f7_from_wb(models, wb, fam)
+            elif age_days == 14:
+                strength = predict_f14_from_wb(models, wb, fam)
+            else:
+                strength = implied_f28_from_wb(models, wb, fam)
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Concrete family", family)
-            c2.metric("Estimated w/b ratio", f"{wb:.3f}")
-            c3.metric("Water", f"{water:.1f} kg/m³")
-            c4.metric("Total binder", f"{binder_total:.1f} kg/m³")
-
-            c5, c6, c7 = st.columns(3)
-            c5.metric("28-day requirement", f"≥ {f28_min:.1f} MPa")
-            c6.metric("Early-age requirement", f"≥ {early_strength:.1f} MPa")
-            c7.metric("Embodied carbon", f"{ec_total:.1f} kgCO₂-e/m³")
-
-            selected_family = family_lookup.get(family)
-            if selected_family:
-                st.info(
-                    f"Selected family: **{selected_family['Family']}** | "
-                    f"Mix: **{selected_family['Mix']}** | "
-                    f"Cement: **{selected_family['Cement (%)']}%** | "
-                    f"GGBFS: **{selected_family['GGBFS (%)']}%** | "
-                    f"Fly Ash: **{selected_family['Fly Ash (%)']}%**"
-                )
-
-            st.success(
-                f"Mix design generated for {family} with a {early_age_days}-day minimum strength requirement."
-            )
-
-        with tab2:
-            st.subheader("Mix Design Output")
-            st.dataframe(result_df, use_container_width=True, hide_index=True)
-
-            csv = result_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download mix design as CSV",
-                data=csv,
-                file_name=f"mix_design_{family}_{early_age_days}d.csv",
-                mime="text/csv",
-            )
-
-        with tab3:
-            st.subheader("Predicted Strengths")
-
-            strength_df = pd.DataFrame(
+            rows.append(
                 {
-                    "Age": ["3 Day", "7 Day", "14 Day", "28 Day"],
-                    "Predicted strength (MPa)": [
-                        round(pred_f3, 2),
-                        round(pred_f7, 2),
-                        round(pred_f14, 2),
-                        round(pred_f28, 2),
-                    ],
-                }
-            )
-            st.table(strength_df)
-
-            st.markdown("**Selected design requirement**")
-            st.write(f"- Required {early_age_days}-day strength: **{early_strength:.2f} MPa**")
-            st.write(f"- Required 28-day strength: **{f28_min:.2f} MPa**")
-
-        with st.expander("Technical details (for research use)"):
-            st.write("Model workflow:")
-            st.write("1. The selected 28-day requirement is used to estimate the water–binder ratio.")
-            st.write("2. The selected early-age requirement and age are used in the mix-design model.")
-            st.write("3. Water content is estimated from the early-age strength, 28-day strength, and water–binder ratio.")
-            st.write("4. Binder split, admixtures, aggregates, and embodied carbon are then calculated.")
-            st.write("5. 3-day, 7-day, 14-day, and 28-day strengths are reported from the final water–binder ratio.")
-
-            st.json(
-                {
-                    "family": family,
-                    "selected_requirement_days": int(early_age_days),
-                    "input_early_strength_mpa": float(early_strength),
-                    "input_28_day_strength_mpa": float(f28_min),
-                    "estimated_wb": round(wb, 4),
-                    "predicted_f3_mpa": round(pred_f3, 4),
-                    "predicted_f7_mpa": round(pred_f7, 4),
-                    "predicted_f14_mpa": round(pred_f14, 4),
-                    "predicted_f28_mpa": round(pred_f28, 4),
+                    "Water/Binder ratio": wb,
+                    "Compressive strength": strength,
+                    "Binder family": fam,
+                    "Age label": f"{age_days} Day",
                 }
             )
 
-    except Exception as e:
-        st.error("The mix design could not be generated.")
-        st.exception(e)
+    return pd.DataFrame(rows)
+
+
+def build_family_multiage_curve_df(models, family_key, age_list=(3, 7, 14, 28)):
+    wb_values = np.linspace(0.34, 0.75, 120)
+    rows = []
+
+    for age_days in age_list:
+        for wb in wb_values:
+            if age_days == 3:
+                strength = predict_f3_from_wb(models, wb, family_key)
+            elif age_days == 7:
+                strength = predict_f7_from_wb(models, wb, family_key)
+            elif age_days == 14:
+                strength = predict_f14_from_wb(models, wb, family_key)
+            else:
+                strength = implied_f28_from_wb(models, wb, family_key)
+
+            rows.append(
+                {
+                    "Water/Binder ratio": wb,
+                    "Compressive strength": strength,
+                    "Binder family": family_key,
+                    "Age label": f"{age_days} Day",
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------
+
+st.sidebar.header("Inputs")
+
+FAMILY_OPTIONS = ["P1", "F2", "F4", "F5", "S3", "S5", "S6", "T1", "T2"]
+
+family = st.sidebar.selectbox(
+    "Binder family",
+    FAMILY_OPTIONS
+)
+
+early_age_label = st.sidebar.selectbox(
+    "Early-age strength age",
+    ["3 Day", "7 Day", "14 Day"]
+)
+
+early_age_days = {
+    "3 Day": 3,
+    "7 Day": 7,
+    "14 Day": 14
+}[early_age_label]
+
+min_early_strength = st.sidebar.number_input(
+    "Minimum early-age strength (MPa)",
+    0.0,
+    100.0,
+    25.0,
+)
+
+min_28_strength = st.sidebar.number_input(
+    "Minimum 28-day strength (MPa)",
+    0.0,
+    100.0,
+    40.0,
+)
+
+generate = st.sidebar.button("Generate Mix Design")
+
+
+# ---------------------------------------------------------
+# RUN MIX DESIGN
+# ---------------------------------------------------------
+
+if generate:
+
+    mix = design_mix_from_strengths_min(
+        models=models,
+        early_min=min_early_strength,
+        f28_min=min_28_strength,
+        binder_family_key=family,
+        early_age_days=early_age_days,
+    )
+
+    wb = float(mix["predicted_parameters"]["water_binder_ratio"])
+
+    pred_f3 = float(predict_f3_from_wb(models, wb, family))
+    pred_f7 = float(predict_f7_from_wb(models, wb, family))
+    pred_f14 = float(predict_f14_from_wb(models, wb, family))
+    pred_f28 = float(implied_f28_from_wb(models, wb, family))
+
+    if early_age_days == 3:
+        pred_early = pred_f3
+    elif early_age_days == 7:
+        pred_early = pred_f7
+    else:
+        pred_early = pred_f14
+
+    pp = mix["predicted_parameters"]
+    binder_total = float(pp["binder_total_kg_m3"])
+    water = float(pp["water_kg_m3"])
+    ec_total = float(mix["embodied_carbon"]["EC_total"])
+    result_df = format_mix_output(mix)
+
+    # -----------------------------------------------------
+    # Feasibility checks
+    # -----------------------------------------------------
+    wb_min_allowed, wb_max_allowed = get_allowed_wb_bounds(family, early_age_days)
+
+    early_lo, early_hi = get_strength_range_for_family(
+        models=models,
+        family_key=family,
+        age_days=early_age_days,
+        wb_min=wb_min_allowed,
+        wb_max=wb_max_allowed,
+    )
+
+    d28_lo, d28_hi = get_strength_range_for_family(
+        models=models,
+        family_key=family,
+        age_days=28,
+        wb_min=wb_min_allowed,
+        wb_max=wb_max_allowed,
+    )
+
+    feasibility_warnings = []
+
+    if float(min_early_strength) < early_lo:
+        feasibility_warnings.append(
+            f"{early_age_days}-day requirement ({float(min_early_strength):.2f} MPa) is below the achievable range "
+            f"for {family} ({early_lo:.2f} to {early_hi:.2f} MPa) within allowed w/b limits "
+            f"({wb_min_allowed:.2f} to {wb_max_allowed:.2f})."
+        )
+    elif float(min_early_strength) > early_hi:
+        feasibility_warnings.append(
+            f"{early_age_days}-day requirement ({float(min_early_strength):.2f} MPa) is above the achievable range "
+            f"for {family} ({early_lo:.2f} to {early_hi:.2f} MPa) within allowed w/b limits "
+            f"({wb_min_allowed:.2f} to {wb_max_allowed:.2f})."
+        )
+
+    if float(min_28_strength) < d28_lo:
+        feasibility_warnings.append(
+            f"28-day requirement ({float(min_28_strength):.2f} MPa) is below the achievable range "
+            f"for {family} ({d28_lo:.2f} to {d28_hi:.2f} MPa) within allowed w/b limits "
+            f"({wb_min_allowed:.2f} to {wb_max_allowed:.2f})."
+        )
+    elif float(min_28_strength) > d28_hi:
+        feasibility_warnings.append(
+            f"28-day requirement ({float(min_28_strength):.2f} MPa) is above the achievable range "
+            f"for {family} ({d28_lo:.2f} to {d28_hi:.2f} MPa) within allowed w/b limits "
+            f"({wb_min_allowed:.2f} to {wb_max_allowed:.2f})."
+        )
+
+    # -----------------------------------------------------
+    # Requirement match warnings
+    # -----------------------------------------------------
+    match_warnings = []
+
+    early_diff = float(pred_early) - float(min_early_strength)
+    d28_diff = float(pred_f28) - float(min_28_strength)
+
+    if abs(early_diff) > STRENGTH_MATCH_TOL_MPA:
+        if early_diff > 0:
+            match_warnings.append(
+                f"{early_age_days}-day predicted strength ({pred_early:.2f} MPa) is "
+                f"{early_diff:.2f} MPa above the requirement ({min_early_strength:.2f} MPa)."
+            )
+        else:
+            match_warnings.append(
+                f"{early_age_days}-day predicted strength ({pred_early:.2f} MPa) is "
+                f"{abs(early_diff):.2f} MPa below the requirement ({min_early_strength:.2f} MPa)."
+            )
+
+    if abs(d28_diff) > STRENGTH_MATCH_TOL_MPA:
+        if d28_diff > 0:
+            match_warnings.append(
+                f"28-day predicted strength ({pred_f28:.2f} MPa) is "
+                f"{d28_diff:.2f} MPa above the requirement ({min_28_strength:.2f} MPa)."
+            )
+        else:
+            match_warnings.append(
+                f"28-day predicted strength ({pred_f28:.2f} MPa) is "
+                f"{abs(d28_diff):.2f} MPa below the requirement ({min_28_strength:.2f} MPa)."
+            )
+
+    tab1, tab2 = st.tabs(["Generated Mix Design", "Predicted Strengths"])
+
+    with tab1:
+        st.header("Generated Mix Design")
+
+        if feasibility_warnings:
+            for msg in feasibility_warnings:
+                st.warning(msg)
+            st.info("Closest feasible mix within the model bounds has been returned.")
+
+        if match_warnings:
+            for msg in match_warnings:
+                st.warning(msg)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Concrete family", family)
+        c2.metric("Estimated w/b ratio", f"{wb:.3f}")
+        c3.metric("Water", f"{water:.1f} kg/m³")
+        c4.metric("Total binder", f"{binder_total:.1f} kg/m³")
+
+        c5, c6, c7 = st.columns(3)
+        c5.metric("28-day requirement", f"≥ {min_28_strength:.1f} MPa")
+        c6.metric("Early-age requirement", f"≥ {min_early_strength:.1f} MPa")
+        c7.metric("Embodied carbon", f"{ec_total:.1f} kgCO₂-e/m³")
+
+        st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+    with tab2:
+        st.header("Predicted Strengths")
+
+        if feasibility_warnings:
+            st.info("Displayed strengths correspond to the closest feasible mix returned by the model.")
+
+        if match_warnings:
+            for msg in match_warnings:
+                st.warning(msg)
+
+        strength_df = pd.DataFrame(
+            {
+                "Age": [3, 7, 14, 28],
+                "Strength (MPa)": [
+                    round(pred_f3, 2),
+                    round(pred_f7, 2),
+                    round(pred_f14, 2),
+                    round(pred_f28, 2),
+                ],
+            }
+        )
+
+        st.dataframe(strength_df, use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------
+# GRAPH SECTION
+# ---------------------------------------------------------
+
+st.header("Strength vs Water–Binder Ratio")
+
+graph_mode = st.radio(
+    "Graph mode",
+    [
+        "Selected family - all ages",
+        "All families - one age",
+    ],
+    horizontal=True,
+)
+
+if graph_mode == "All families - one age":
+    graph_age_label = st.selectbox(
+        "Graph strength age",
+        ["3 Day", "7 Day", "14 Day", "28 Day"],
+        index=3
+    )
+
+    graph_age_days = {
+        "3 Day": 3,
+        "7 Day": 7,
+        "14 Day": 14,
+        "28 Day": 28
+    }[graph_age_label]
+
+    curve_df = build_strength_curve_df(
+        models,
+        FAMILY_OPTIONS,
+        graph_age_days
+    )
+
+    if graph_age_days == 28:
+        chosen_strength = float(min_28_strength)
+    elif graph_age_days == early_age_days:
+        chosen_strength = float(min_early_strength)
+    else:
+        chosen_strength = 0.0
+
+    base = alt.Chart(curve_df)
+
+    chart = (
+        base
+        .mark_line()
+        .encode(
+            x=alt.X(
+                "Water/Binder ratio:Q",
+                title="Water/Binder ratio"
+            ),
+            y=alt.Y(
+                "Compressive strength:Q",
+                title="Compressive strength (MPa)"
+            ),
+            color=alt.Color(
+                "Binder family:N",
+                title="Binder family"
+            ),
+            tooltip=[
+                alt.Tooltip("Binder family:N"),
+                alt.Tooltip("Age label:N"),
+                alt.Tooltip("Water/Binder ratio:Q", format=".3f"),
+                alt.Tooltip("Compressive strength:Q", format=".2f"),
+            ],
+        )
+        .properties(height=450)
+        .interactive()
+    )
+
+    if chosen_strength > 0:
+        rule_df = pd.DataFrame(
+            {
+                "Target strength": [chosen_strength],
+                "Label": [f"Target = {chosen_strength:.1f} MPa"],
+            }
+        )
+
+        rule = (
+            alt.Chart(rule_df)
+            .mark_rule(strokeDash=[8, 6], size=2)
+            .encode(
+                y=alt.Y("Target strength:Q"),
+                tooltip=[alt.Tooltip("Label:N")],
+            )
+        )
+
+        text = (
+            alt.Chart(rule_df)
+            .mark_text(align="left", dx=8, dy=-6)
+            .encode(
+                x=alt.value(10),
+                y=alt.Y("Target strength:Q"),
+                text="Label:N",
+            )
+        )
+
+        st.altair_chart(chart + rule + text, use_container_width=True)
+    else:
+        st.altair_chart(chart, use_container_width=True)
+
 else:
-    st.info("Enter the design inputs on the left and click **Generate Mix Design**.")
+    family_curve_df = build_family_multiage_curve_df(
+        models=models,
+        family_key=family,
+        age_list=(3, 7, 14, 28),
+    )
+
+    show_early_line = st.checkbox("Show early-age target line", value=True)
+    show_28_line = st.checkbox("Show 28-day target line", value=True)
+
+    base = alt.Chart(family_curve_df)
+
+    chart = (
+        base
+        .mark_line()
+        .encode(
+            x=alt.X(
+                "Water/Binder ratio:Q",
+                title="Water/Binder ratio"
+            ),
+            y=alt.Y(
+                "Compressive strength:Q",
+                title="Compressive strength (MPa)"
+            ),
+            color=alt.Color(
+                "Age label:N",
+                title="Strength age"
+            ),
+            tooltip=[
+                alt.Tooltip("Binder family:N"),
+                alt.Tooltip("Age label:N"),
+                alt.Tooltip("Water/Binder ratio:Q", format=".3f"),
+                alt.Tooltip("Compressive strength:Q", format=".2f"),
+            ],
+        )
+        .properties(height=450)
+        .interactive()
+    )
+
+    layers = [chart]
+
+    if show_early_line:
+        early_rule_df = pd.DataFrame(
+            {
+                "Target strength": [float(min_early_strength)],
+                "Label": [f"Early target = {float(min_early_strength):.1f} MPa"],
+            }
+        )
+
+        early_rule = (
+            alt.Chart(early_rule_df)
+            .mark_rule(strokeDash=[8, 6], size=2)
+            .encode(
+                y=alt.Y("Target strength:Q"),
+                tooltip=[alt.Tooltip("Label:N")],
+            )
+        )
+
+        early_text = (
+            alt.Chart(early_rule_df)
+            .mark_text(align="left", dx=8, dy=-6)
+            .encode(
+                x=alt.value(10),
+                y=alt.Y("Target strength:Q"),
+                text="Label:N",
+            )
+        )
+
+        layers.extend([early_rule, early_text])
+
+    if show_28_line:
+        d28_rule_df = pd.DataFrame(
+            {
+                "Target strength": [float(min_28_strength)],
+                "Label": [f"28-day target = {float(min_28_strength):.1f} MPa"],
+            }
+        )
+
+        d28_rule = (
+            alt.Chart(d28_rule_df)
+            .mark_rule(strokeDash=[8, 6], size=2)
+            .encode(
+                y=alt.Y("Target strength:Q"),
+                tooltip=[alt.Tooltip("Label:N")],
+            )
+        )
+
+        d28_text = (
+            alt.Chart(d28_rule_df)
+            .mark_text(align="left", dx=8, dy=-6)
+            .encode(
+                x=alt.value(10),
+                y=alt.Y("Target strength:Q"),
+                text="Label:N",
+            )
+        )
+
+        layers.extend([d28_rule, d28_text])
+
+    final_chart = layers[0]
+    for layer in layers[1:]:
+        final_chart = final_chart + layer
+
+    st.altair_chart(final_chart, use_container_width=True)
+    st.caption(f"Showing 3, 7, 14 and 28-day strength curves for selected family: {family}")

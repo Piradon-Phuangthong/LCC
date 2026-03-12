@@ -1,4 +1,3 @@
-# lcc/models.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,21 +11,24 @@ from .config import BINDER_FAMILIES, USE_FIXED_WATER, WATER_FIXED
 
 @dataclass
 class ModelsBundle:
-    # curves
+    # 28-day Abram curves
     family_curves: Dict[str, Tuple[float, float]]
     A_g: float
     b_g: float
 
-    # inverse wb
+    # 3-day Abram curves
+    family_curves_f3: Dict[str, Tuple[float, float]]
+    A3_g: float
+    b3_g: float
+
+    # 7-day Abram curves
+    family_curves_f7: Dict[str, Tuple[float, float]]
+    A7_g: float
+    b7_g: float
+
+    # inverse wb from 28d
     wb_inv_models: Dict[str, KNeighborsRegressor]
     wb_ranges: Dict[str, Tuple[float, float]]
-
-    # f3 / f7 models
-    family_models_f3: Dict[str, KNeighborsRegressor]
-    knn_f3_global: KNeighborsRegressor
-
-    family_models_f7: Dict[str, KNeighborsRegressor]
-    knn_f7_global: KNeighborsRegressor
 
     # water models
     family_models_water_3d: Dict[str, KNeighborsRegressor]
@@ -43,38 +45,70 @@ def _power_model(x, A, b):
     return A * (x ** b)
 
 
-def fit_abram_curve(df_sub):
-    x = df_sub["Water/Binder"].values.astype(float)
-    y = df_sub["Strength28d"].values.astype(float)
-    m = (x > 0) & (y > 0)
+def fit_abram_curve_xy(x_vals, y_vals, default_A=100.0, default_b=-1.8):
+    x = np.asarray(x_vals, dtype=float)
+    y = np.asarray(y_vals, dtype=float)
+
+    m = (x > 0) & (y > 0) & np.isfinite(x) & np.isfinite(y)
     x, y = x[m], y[m]
+
     if len(x) < 2:
-        return 100.0, -1.8
+        return float(default_A), float(default_b)
+
     try:
         from scipy.optimize import curve_fit  # type: ignore
 
         b0, a0 = np.polyfit(np.log(x), np.log(y), 1)
         A0 = float(np.exp(a0))
+
         (A, b), _ = curve_fit(
             _power_model,
             x,
             y,
             p0=(A0, b0),
-            bounds=([1e-6, -4.0], [1e3, -0.6]),
+            bounds=([1e-6, -4.5], [1e4, -0.2]),
+            maxfev=20000,
         )
         return float(A), float(b)
+
     except Exception:
         lx, ly = np.log(x), np.log(y)
         b, a = np.polyfit(lx, ly, 1)
         A = float(np.exp(a))
-        if b < -2.1:
-            b = -1.9
+        b = float(min(-0.2, max(-4.5, b)))
         return float(A), float(b)
+
+
+def fit_abram_curve(df_sub):
+    return fit_abram_curve_xy(
+        df_sub["Water/Binder"].values,
+        df_sub["Strength28d"].values,
+        default_A=100.0,
+        default_b=-1.8,
+    )
+
+
+def fit_abram_curve_f3(df_sub):
+    return fit_abram_curve_xy(
+        df_sub["Water/Binder"].values,
+        df_sub["Strength3d"].values,
+        default_A=55.0,
+        default_b=-1.5,
+    )
+
+
+def fit_abram_curve_f7(df_sub):
+    return fit_abram_curve_xy(
+        df_sub["Water/Binder"].values,
+        df_sub["Strength7d"].values,
+        default_A=75.0,
+        default_b=-1.6,
+    )
 
 
 def build_models(df) -> ModelsBundle:
     # -------------------------
-    # Inverse wb models
+    # Inverse wb models from 28d
     # -------------------------
     wb_inv_models: Dict[str, KNeighborsRegressor] = {}
     wb_ranges: Dict[str, Tuple[float, float]] = {}
@@ -84,52 +118,42 @@ def build_models(df) -> ModelsBundle:
             mdl = KNeighborsRegressor(n_neighbors=min(4, len(sub)), weights="distance")
             mdl.fit(sub[["Strength28d"]].values, sub["Water/Binder"].values)
             wb_inv_models[fam] = mdl
-            wb_ranges[fam] = (float(sub["Strength28d"].min()), float(sub["Strength28d"].max()))
+            wb_ranges[fam] = (
+                float(sub["Strength28d"].min()),
+                float(sub["Strength28d"].max()),
+            )
 
     # -------------------------
-    # Abram-style curves
+    # 28-day Abram curves
     # -------------------------
     family_curves: Dict[str, Tuple[float, float]] = {}
     for fam in BINDER_FAMILIES.keys():
-        sub = df[df["_family"] == fam]
+        sub = df[df["_family"] == fam][["Water/Binder", "Strength28d"]].dropna()
         if len(sub) >= 2:
             family_curves[fam] = fit_abram_curve(sub)
-    A_g, b_g = fit_abram_curve(df)
+    A_g, b_g = fit_abram_curve(df[["Water/Binder", "Strength28d"]].dropna())
 
     # -------------------------
-    # f3 (family + global fallback)
-    # IMPORTANT: drop NaNs for Strength3d before fitting global model
+    # 3-day Abram curves
     # -------------------------
-    family_models_f3: Dict[str, KNeighborsRegressor] = {}
+    family_curves_f3: Dict[str, Tuple[float, float]] = {}
     for fam in BINDER_FAMILIES.keys():
         sub = df[df["_family"] == fam][["Water/Binder", "Strength3d"]].dropna()
         if len(sub) >= 2:
-            family_models_f3[fam] = KNeighborsRegressor(
-                n_neighbors=min(4, len(sub)), weights="distance"
-            ).fit(sub[["Water/Binder"]].values, sub["Strength3d"].values)
-
-    df_f3 = df.dropna(subset=["Strength3d", "Water/Binder", "_slag_frac", "_fly_frac"]).copy()
-    knn_f3_global = KNeighborsRegressor(n_neighbors=4, weights="distance").fit(
-        df_f3[["Water/Binder", "_slag_frac", "_fly_frac"]].values,
-        df_f3["Strength3d"].values,
-    )
+            family_curves_f3[fam] = fit_abram_curve_f3(sub)
+    df_f3 = df[["Water/Binder", "Strength3d"]].dropna()
+    A3_g, b3_g = fit_abram_curve_f3(df_f3)
 
     # -------------------------
-    # f7 (family + global fallback)
+    # 7-day Abram curves
     # -------------------------
-    family_models_f7: Dict[str, KNeighborsRegressor] = {}
+    family_curves_f7: Dict[str, Tuple[float, float]] = {}
     for fam in BINDER_FAMILIES.keys():
         sub = df[df["_family"] == fam][["Water/Binder", "Strength7d"]].dropna()
         if len(sub) >= 2:
-            family_models_f7[fam] = KNeighborsRegressor(
-                n_neighbors=min(4, len(sub)), weights="distance"
-            ).fit(sub[["Water/Binder"]].values, sub["Strength7d"].values)
-
-    df_f7 = df.dropna(subset=["Strength7d", "Water/Binder", "_slag_frac", "_fly_frac"]).copy()
-    knn_f7_global = KNeighborsRegressor(n_neighbors=4, weights="distance").fit(
-        df_f7[["Water/Binder", "_slag_frac", "_fly_frac"]].values,
-        df_f7["Strength7d"].values,
-    )
+            family_curves_f7[fam] = fit_abram_curve_f7(sub)
+    df_f7 = df[["Water/Binder", "Strength7d"]].dropna()
+    A7_g, b7_g = fit_abram_curve_f7(df_f7)
 
     # -------------------------
     # Water models (3d)
@@ -141,14 +165,17 @@ def build_models(df) -> ModelsBundle:
         )
         if len(sub) >= 2:
             family_models_water_3d[fam] = KNeighborsRegressor(
-                n_neighbors=3, weights="distance"
+                n_neighbors=min(3, len(sub)),
+                weights="distance",
             ).fit(
                 sub[["Strength3d", "Strength28d", "Water/Binder"]].values,
                 sub["Free Water"].values,
             )
 
-    df_w3 = df.dropna(subset=["Strength3d", "Strength28d", "Water/Binder", "Free Water"]).copy()
-    knn_water_global_3d = KNeighborsRegressor(n_neighbors=3, weights="distance").fit(
+    df_w3 = df.dropna(
+        subset=["Strength3d", "Strength28d", "Water/Binder", "Free Water"]
+    ).copy()
+    knn_water_global_3d = KNeighborsRegressor(n_neighbors=min(3, len(df_w3)), weights="distance").fit(
         df_w3[["Strength3d", "Strength28d", "Water/Binder"]].values,
         df_w3["Free Water"].values,
     )
@@ -163,31 +190,36 @@ def build_models(df) -> ModelsBundle:
         )
         if len(sub) >= 2:
             family_models_water_7d[fam] = KNeighborsRegressor(
-                n_neighbors=3, weights="distance"
+                n_neighbors=min(3, len(sub)),
+                weights="distance",
             ).fit(
                 sub[["Strength7d", "Strength28d", "Water/Binder"]].values,
                 sub["Free Water"].values,
             )
 
-    df_w7 = df.dropna(subset=["Strength7d", "Strength28d", "Water/Binder", "Free Water"]).copy()
-    knn_water_global_7d = KNeighborsRegressor(n_neighbors=3, weights="distance").fit(
+    df_w7 = df.dropna(
+        subset=["Strength7d", "Strength28d", "Water/Binder", "Free Water"]
+    ).copy()
+    knn_water_global_7d = KNeighborsRegressor(n_neighbors=min(3, len(df_w7)), weights="distance").fit(
         df_w7[["Strength7d", "Strength28d", "Water/Binder"]].values,
         df_w7["Free Water"].values,
     )
 
-    # NOTE: keep W_MIN/W_MAX based on full df water range (NaNs in strengths don't matter)
-    W_MIN, W_MAX = float(df["Free Water"].min()), float(df["Free Water"].max())
+    W_MIN = float(df["Free Water"].min())
+    W_MAX = float(df["Free Water"].max())
 
     return ModelsBundle(
         family_curves=family_curves,
         A_g=A_g,
         b_g=b_g,
+        family_curves_f3=family_curves_f3,
+        A3_g=A3_g,
+        b3_g=b3_g,
+        family_curves_f7=family_curves_f7,
+        A7_g=A7_g,
+        b7_g=b7_g,
         wb_inv_models=wb_inv_models,
         wb_ranges=wb_ranges,
-        family_models_f3=family_models_f3,
-        knn_f3_global=knn_f3_global,
-        family_models_f7=family_models_f7,
-        knn_f7_global=knn_f7_global,
         family_models_water_3d=family_models_water_3d,
         knn_water_global_3d=knn_water_global_3d,
         family_models_water_7d=family_models_water_7d,
@@ -216,38 +248,46 @@ def _wb_from_knn(models: ModelsBundle, f28: float, fam_key: str) -> Optional[flo
 def predict_wb_from_f28_curve(models: ModelsBundle, f28: float, fam_key: str) -> float:
     wb_curve = _wb_from_curve(models, f28, fam_key)
     wb_knn = _wb_from_knn(models, f28, fam_key)
+
     if wb_knn is None:
         wb = wb_curve
     else:
         f = float(f28)
-
-        
         w_data = 0.7 if f <= 40 else (0.4 if f >= 60 else 0.7 - (0.3 * (f - 40) / 20.0))
         wb = w_data * wb_knn + (1.0 - w_data) * wb_curve
 
-    # ensure curve-implied f28 >= target f28
     wb = min(wb, wb_curve)
-
     return max(0.34, min(0.75, wb))
+
+
+def _wb_from_age_curve(
+    target_strength: float,
+    A: float,
+    b: float,
+    wb_min: float = 0.34,
+    wb_max: float = 0.75,
+) -> float:
+    if abs(b) < 1e-9 or A <= 0.0 or target_strength <= 0.0:
+        return 0.50
+    wb = float((max(1e-6, target_strength) / A) ** (1.0 / b))
+    return max(wb_min, min(wb_max, wb))
 
 
 def implied_f28_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
     A, b = models.family_curves.get(fam_key, (models.A_g, models.b_g))
-    return float(A * (wb ** b))
+    return float(A * (float(wb) ** b))
 
 
 def predict_f3_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
-    mdl = models.family_models_f3.get(fam_key)
-    if mdl is not None:
-        return float(mdl.predict([[wb]])[0])
-    fam = BINDER_FAMILIES.get(fam_key, {})
-    s = float(fam.get("GGBFS", 0.0))
-    f = float(fam.get("Fly Ash", 0.0))
-    return float(models.knn_f3_global.predict([[wb, s, f]])[0])
+    A, b = models.family_curves_f3.get(fam_key, (models.A3_g, models.b3_g))
+    return float(A * (float(wb) ** b))
 
-# -------------------------------------------------------------------------
-# NEW: 3-day anchor inversion (used only when early_age_days == 3)
-# -------------------------------------------------------------------------
+
+def predict_f7_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
+    A, b = models.family_curves_f7.get(fam_key, (models.A7_g, models.b7_g))
+    return float(A * (float(wb) ** b))
+
+
 def predict_wb_from_f3_anchor(
     models: ModelsBundle,
     f3_target: float,
@@ -256,53 +296,41 @@ def predict_wb_from_f3_anchor(
     wb_max: float = 0.75,
     n_grid: int = 500,
 ) -> float:
-    """
-    Invert the f3 model to obtain w/b that matches the 3-day target.
-    Uses bounded 1D grid search over a realistic w/b range.
-    """
-
-    wb_grid = np.linspace(wb_min, wb_max, n_grid)
-
-    # Predict f3 over the grid
-    f3_preds = np.array([
-        predict_f3_from_wb(models, wb, fam_key)
-        for wb in wb_grid
-    ])
-
-    # Find wb that minimizes absolute error to target
-    idx = np.argmin(np.abs(f3_preds - f3_target))
-    return float(wb_grid[idx])
+    A, b = models.family_curves_f3.get(fam_key, (models.A3_g, models.b3_g))
+    return _wb_from_age_curve(
+        target_strength=float(f3_target),
+        A=A,
+        b=b,
+        wb_min=wb_min,
+        wb_max=wb_max,
+    )
 
 
-def predict_f7_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
-    mdl = models.family_models_f7.get(fam_key)
-    if mdl is not None:
-        return float(mdl.predict([[wb]])[0])
-    fam = BINDER_FAMILIES.get(fam_key, {})
-    s = float(fam.get("GGBFS", 0.0))
-    f = float(fam.get("Fly Ash", 0.0))
-    return float(models.knn_f7_global.predict([[wb, s, f]])[0])
-
+def predict_wb_from_f7_anchor(
+    models: ModelsBundle,
+    f7_target: float,
+    fam_key: str,
+    wb_min: float = 0.34,
+    wb_max: float = 0.75,
+    n_grid: int = 500,
+) -> float:
+    A, b = models.family_curves_f7.get(fam_key, (models.A7_g, models.b7_g))
+    return _wb_from_age_curve(
+        target_strength=float(f7_target),
+        A=A,
+        b=b,
+        wb_min=wb_min,
+        wb_max=wb_max,
+    )
 
 
 def predict_f14_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
-    """
-    Predict 14-day strength using the existing 7-day and 28-day predictors.
-
-    We do NOT have a dedicated 14-day model in the dataset, so we estimate
-    strength development between 7 and 28 days with a simple power law:
-
-        f(t) = f28 * (t/28)^n
-
-    where n is derived from the predicted ratio f7/f28.
-    """
     f28 = float(implied_f28_from_wb(models, wb, fam_key))
     f7 = float(predict_f7_from_wb(models, wb, fam_key))
 
     if f28 <= 0.0:
         return 0.0
 
-    # Clamp ratio to avoid exploding exponents from model noise
     r = f7 / f28
     r = max(0.01, min(0.999, float(r)))
 
@@ -311,7 +339,6 @@ def predict_f14_from_wb(models: ModelsBundle, wb: float, fam_key: str) -> float:
 
     f14 = float(f28 * ((14.0 / 28.0) ** n))
 
-    # Keep monotonic between 7d and 28d
     lo = min(f7, f28)
     hi = max(f7, f28)
     return max(lo, min(hi, f14))

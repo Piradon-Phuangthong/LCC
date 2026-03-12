@@ -1,4 +1,3 @@
-# lcc/design.py
 from __future__ import annotations
 
 from typing import Dict, Any, Optional
@@ -11,6 +10,8 @@ from .config import (
 from .models import (
     ModelsBundle,
     predict_wb_from_f28_curve,
+    predict_wb_from_f3_anchor,
+    predict_wb_from_f7_anchor,
     get_water,
 )
 from .aggregates import (
@@ -52,16 +53,38 @@ def design_mix_from_strengths_min(
     fam_key = binder_family_key.upper()
 
     # ---------------------------------------------------------------------
-    # 1) Choose w/b (unchanged base behaviour)
+    # 1) Choose w/b
     # ---------------------------------------------------------------------
     if wb_override is not None:
         wb_pred = float(wb_override)
+
     else:
-        wb_pred = float(predict_wb_from_f28_curve(models, f28_min, fam_key))
+        # Always compute 28d-based upper bound on w/b
+        # To satisfy minimum 28d strength, w/b must not exceed this.
+        wb_from_28 = float(predict_wb_from_f28_curve(models, f28_min, fam_key))
+
+        if int(early_age_days) == 3:
+            wb_from_early = float(
+                predict_wb_from_f3_anchor(models, early_min, fam_key)
+            )
+            # Must satisfy BOTH:
+            # - early-age minimum
+            # - 28-day minimum
+            # So choose the smaller (more conservative) w/b.
+            wb_pred = min(wb_from_early, wb_from_28)
+
+        elif int(early_age_days) == 7:
+            wb_from_early = float(
+                predict_wb_from_f7_anchor(models, early_min, fam_key)
+            )
+            wb_pred = min(wb_from_early, wb_from_28)
+
+        else:
+            # Keep 14-day behaviour based on 28-day curve
+            wb_pred = wb_from_28
 
     # ---------------------------------------------------------------------
     # 1b) Apply limits ONLY for 3-day mode
-    #     (7-day and 14-day are left exactly as-is)
     # ---------------------------------------------------------------------
     if int(early_age_days) == 3:
         wb_cap = WB_MAX_BY_FAMILY_3D.get(fam_key)
@@ -90,7 +113,9 @@ def design_mix_from_strengths_min(
     fam = BINDER_FAMILIES[fam_key]
     slag_frac, fly_frac = fam.get("GGBFS", 0.0), fam.get("Fly Ash", 0.0)
     cem_frac = max(0.0, 1.0 - slag_frac - fly_frac)
-    c, s, fa = binder_total * cem_frac, binder_total * slag_frac, binder_total * fly_frac
+    c = binder_total * cem_frac
+    s = binder_total * slag_frac
+    fa = binder_total * fly_frac
 
     # ---------------------------------------------------------------------
     # 4) Admixtures (sheet-accurate) - unchanged
@@ -117,18 +142,22 @@ def design_mix_from_strengths_min(
         M_agg_total = V_agg_L * rho_agg_kg_per_L
         a20 = M_agg_total * split["20mm"]
         a10 = M_agg_total * split["10mm"]
-        ms  = M_agg_total * split["Man"]
-        ns  = M_agg_total * split["Nat"]
+        ms = M_agg_total * split["Man"]
+        ns = M_agg_total * split["Nat"]
 
         rho_target = water_pred + binder_total + adm_total + M_agg_total
         center_wb = wb_pred
+
     else:
         center_wb, (a20_b, a10_b, ms_b, ns_b), rho_target, air_pct = nearest_template_family(wb_pred)
         base_ag = a20_b + a10_b + ms_b + ns_b
         non_ag = water_pred + binder_total + adm_total
         aggs_needed = max(0.0, rho_target - non_ag)
         scale = aggs_needed / base_ag if base_ag > 0 else 1.0
-        a20, a10, ms, ns = a20_b * scale, a10_b * scale, ms_b * scale, ns_b * scale
+        a20 = a20_b * scale
+        a10 = a10_b * scale
+        ms = ms_b * scale
+        ns = ns_b * scale
 
     aggs_dict = {
         "20mm Aggregate": a20,
@@ -136,12 +165,21 @@ def design_mix_from_strengths_min(
         "Man Sand": ms,
         "Natural Sand": ns,
     }
-    binder_dict = {"Cement": c, "GGBFS": s, "Fly Ash": fa}
+    binder_dict = {
+        "Cement": c,
+        "GGBFS": s,
+        "Fly Ash": fa,
+    }
 
     # ---------------------------------------------------------------------
     # 6) EC (REPORT-ALIGNED) - unchanged
     # ---------------------------------------------------------------------
-    ec_breakdown = compute_ec_report_aligned(water_pred, binder_dict, aggs_dict, (plast, eco, ret))
+    ec_breakdown = compute_ec_report_aligned(
+        water_pred,
+        binder_dict,
+        aggs_dict,
+        (plast, eco, ret),
+    )
     total_mass = water_pred + binder_total + (a20 + a10 + ms + ns) + adm_total
 
     return {
@@ -161,8 +199,14 @@ def design_mix_from_strengths_min(
             "wb_family_center": float(center_wb),
         },
         "binder_exact": binder_dict,
-        "admixture_split_kg_m3": {"Plastiment 30": plast, "ECO WR": eco, "Retarder": ret},
+        "admixture_split_kg_m3": {
+            "Plastiment 30": plast,
+            "ECO WR": eco,
+            "Retarder": ret,
+        },
         "aggregates_exact": aggs_dict,
         "embodied_carbon": ec_breakdown,
-        "totals": {"sum_all_components_kg_m3": float(total_mass)},
+        "totals": {
+            "sum_all_components_kg_m3": float(total_mass),
+        },
     }
